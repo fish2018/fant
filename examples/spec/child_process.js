@@ -1,0 +1,145 @@
+import { test, testThrows, summary } from './helpers.js';
+import { spawn, exec, execSync, spawnSync } from 'child_process';
+import { ChildProcess as NodeChildProcess } from 'node:child_process';
+
+console.log('Child Process Tests\n');
+
+test('execSync returns stdout', execSync('echo hello').toString().trim(), 'hello');
+test('execSync with spaces', execSync('echo "hello world"').toString().trim(), 'hello world');
+test('execSync returns a Buffer by default', Buffer.isBuffer(execSync('true')), true);
+test('execSync honours encoding', typeof execSync('true', { encoding: 'utf8' }), 'string');
+
+testThrows('execSync throws on non-zero exit', () => {
+  execSync('exit 1');
+});
+
+const syncResult = spawnSync('echo', ['hello', 'world']);
+test('spawnSync stdout', syncResult.stdout.toString().trim(), 'hello world');
+test('spawnSync status 0', syncResult.status, 0);
+test('spawnSync signal null', syncResult.signal, null);
+test('spawnSync has pid', syncResult.pid > 0, true);
+
+const failSync = spawnSync('sh', ['-c', 'exit 42']);
+test('spawnSync non-zero status', failSync.status, 42);
+
+const stderrSync = spawnSync('sh', ['-c', 'echo error >&2']);
+test('spawnSync captures stderr', stderrSync.stderr.toString().trim(), 'error');
+
+const inputSync = spawnSync('cat', [], { input: 'test input' });
+test('spawnSync with input', inputSync.stdout.toString(), 'test input');
+
+let execDone = false;
+const execDoneP = exec('echo async').then(result => {
+  test('exec resolves with stdout', result.stdout.trim(), 'async');
+  test('exec exitCode', result.exitCode, 0);
+  execDone = true;
+});
+
+let execFailDone = false;
+const execFailDoneP = exec('exit 1').catch(err => {
+  test('exec rejects on non-zero exit', typeof err, 'string');
+  execFailDone = true;
+});
+
+let spawnStdout = '';
+let spawnExitCode = null;
+let spawnClosed = false;
+
+const child = spawn('sh', ['-c', 'echo line1; echo line2']);
+
+test('node:child_process exports ChildProcess', typeof NodeChildProcess, 'function');
+test('spawn returns object', typeof child, 'object');
+test('spawn returns ChildProcess instance', child instanceof NodeChildProcess, true);
+test('spawn has pid', child.pid > 0, true);
+test('spawn has on method', typeof child.on, 'function');
+test('spawn has once method', typeof child.once, 'function');
+test('spawn has kill method', typeof child.kill, 'function');
+
+const constructedChild = new NodeChildProcess();
+let constructedChildEvent = false;
+constructedChild.on('ping', () => {
+  constructedChildEvent = true;
+});
+constructedChild.emit('ping');
+test('new ChildProcess has EventEmitter behavior', constructedChildEvent, true);
+
+child.stdout.on('data', data => {
+  spawnStdout += data;
+});
+
+child.on('exit', code => {
+  spawnExitCode = code;
+});
+
+const childClosedP = new Promise(resolve =>
+  child.on('close', () => {
+    spawnClosed = true;
+    test('spawn collects stdout', spawnStdout.trim(), 'line1\nline2');
+    test('spawn exit code', spawnExitCode, 0);
+    test('spawn close event fired', spawnClosed, true);
+    resolve();
+  })
+);
+
+let stdinRoundTrip = '';
+const stdinChild = spawn('cat');
+stdinChild.stdout.on('data', data => {
+  stdinRoundTrip += data;
+});
+stdinChild.stdin.write('ping');
+stdinChild.stdin.end();
+
+const stdinChildDoneP = new Promise(resolve =>
+  stdinChild.on('close', () => {
+    test('spawn stdin round trip', stdinRoundTrip, 'ping');
+    resolve();
+  })
+);
+
+const shellChildDoneP = childClosedP.then(
+  () =>
+    new Promise(resolve => {
+      const shellChild = spawn('echo $HOME', [], { shell: true });
+      shellChild.on('close', () => {
+        test('spawn with shell option', shellChild.stdout.length > 0, true);
+        resolve();
+      });
+    })
+);
+
+const stderrChild = spawn('sh', ['-c', 'echo err >&2']);
+let stderrData = '';
+stderrChild.stderr.on('data', data => {
+  stderrData += data;
+});
+stderrChild.on('close', () => {
+  test('spawn captures stderr', stderrData.trim(), 'err');
+});
+
+const longChild = spawn('sleep', ['10']);
+let killedExitCode;
+let killedSignal;
+longChild.on('exit', (code, signal) => {
+  killedExitCode = code;
+  killedSignal = signal;
+});
+const longChildDoneP = new Promise(resolve => {
+  longChild.on('close', (code, signal) => {
+    test('signal exit event code is null', killedExitCode, null);
+    test('signal exit event names signal', killedSignal, 'SIGTERM');
+    test('signal close event code is null', code, null);
+    test('signal close event names signal', signal, 'SIGTERM');
+    test('signal leaves exitCode null', longChild.exitCode, null);
+    test('signal sets symbolic signalCode', longChild.signalCode, 'SIGTERM');
+    test('successful kill marks child killed', longChild.killed, true);
+    resolve();
+  });
+});
+const killResult = longChild.kill('SIGTERM');
+test('spawn kill returns true', killResult, true);
+
+Promise.all([execDoneP, execFailDoneP, shellChildDoneP, stdinChildDoneP, longChildDoneP]).then(() => {
+  test('exec async completed', execDone, true);
+  test('exec fail async completed', execFailDone, true);
+  summary();
+});

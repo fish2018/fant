@@ -1,0 +1,8 @@
+{
+  "names": {
+    "darwin": "darwin",
+    "linux": "linux",
+    "win32": "windows"
+  },
+  "supported": ["darwin-arm64"]
+}

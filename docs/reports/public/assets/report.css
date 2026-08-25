@@ -1,0 +1,136 @@
+@font-face {
+  font-family: 'Berkeley Mono';
+  src: url('/assets/BerkeleyMono-Regular.woff2') format('woff2');
+}
+
+* {
+  margin: 0;
+  padding: 0;
+}
+
+html,
+code {
+  font:
+    15px/22px arial,
+    sans-serif;
+}
+
+html {
+  background: #fff;
+  color: #222;
+  padding: 15px;
+}
+
+body {
+  margin: 4% auto 0;
+  max-width: 420px;
+  min-height: 180px;
+  padding: 30px 0 15px;
+}
+
+* > body {
+  padding-right: 205px;
+}
+
+p {
+  margin: 11px 0 22px;
+  overflow: hidden;
+}
+
+.addr {
+  font-family: 'Berkeley Mono';
+  letter-spacing: -0.03em;
+}
+
+.title {
+  margin-top: -2px;
+  font-style: italic;
+  font-size: 15px;
+  font-weight: 550;
+  letter-spacing: -0.02em;
+}
+
+ins {
+  color: #777;
+  text-decoration: none;
+}
+
+a {
+  color: #15c;
+}
+
+code {
+  padding: 2px 5px;
+  background-color: #f2f2f2;
+}
+
+#logo {
+  width: 32px;
+  height: 32px;
+  margin-bottom: 11px;
+  display: inline-block;
+  user-select: none;
+  pointer-events: none;
+}
+
+#logo img {
+  width: 100%;
+  height: 100%;
+}
+
+.meta {
+  margin: 11px 0 22px;
+}
+
+.meta p {
+  margin: 0;
+}
+
+.policy p {
+  overflow: visible;
+}
+
+.label {
+  color: #777;
+}
+
+.frames {
+  padding-inline: 0.7rem;
+  padding-block: 0.3rem;
+  color: #333;
+  background-color: #fcfcfc !important;
+  font-family: 'Berkeley Mono', monospace;
+  margin: 5px 0 11px;
+  max-height: 320px;
+  overflow: auto;
+  white-space: pre;
+}
+
+.frames > code {
+  all: unset;
+}
+
+.frame-index {
+  color: #999;
+}
+
+.url {
+  overflow-wrap: anywhere;
+}
+
+.copy-url {
+  cursor: copy;
+}
+
+.footer {
+  margin-top: 33px;
+}
+
+@media screen and (max-width: 772px) {
+  body {
+    background: none;
+    margin-top: 0;
+    max-width: none;
+    padding-right: 0;
+  }
+}

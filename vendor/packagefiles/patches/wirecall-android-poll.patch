@@ -1,0 +1,206 @@
+diff --git a/meson.build b/meson.build
+index a3578ce..200ace7 100644
+--- a/meson.build
++++ b/meson.build
+@@ -30,6 +30,7 @@ if clang_format.found()
+     'include/wirecall/trace.h',
+     'src/backend/io_uring.c',
+     'src/backend/kqueue.c',
++    'src/backend/poll.c',
+     'src/backend/windows.c',
+     'src/client.c',
+     'src/memory.c',
+@@ -61,6 +62,8 @@ if system == 'darwin' or system.endswith('bsd')
+   backend_sources += files('src/backend/kqueue.c')
+ elif system == 'linux'
+   backend_sources += files('src/backend/io_uring.c')
++elif system == 'android'
++  backend_sources += files('src/backend/poll.c')
+ elif system == 'windows'
+   backend_sources += files('src/backend/windows.c')
+   platform_deps += c.find_library('ws2_32', required: true)
+diff --git a/src/backend/poll.c b/src/backend/poll.c
+new file mode 100644
+index 0000000..69d3f49
+--- /dev/null
++++ b/src/backend/poll.c
+@@ -0,0 +1,179 @@
++#include "backend.h"
++#include "memory.h"
++
++#include <errno.h>
++#include <fcntl.h>
++#include <poll.h>
++#include <stdint.h>
++#include <unistd.h>
++
++typedef struct wirecall_backend_watch {
++  int fd;
++  uint32_t events;
++  uintptr_t user;
++  struct wirecall_backend_watch *next;
++} wirecall_backend_watch;
++
++struct wirecall_backend {
++  int wake_read;
++  int wake_write;
++  wirecall_backend_watch *watches;
++  size_t watch_count;
++};
++
++static int set_nonblock_cloexec(int fd) {
++  int flags = fcntl(fd, F_GETFL, 0);
++  if (flags < 0 || fcntl(fd, F_SETFL, flags | O_NONBLOCK) < 0) return -1;
++
++  flags = fcntl(fd, F_GETFD, 0);
++  if (flags < 0 || fcntl(fd, F_SETFD, flags | FD_CLOEXEC) < 0) return -1;
++  return 0;
++}
++
++static wirecall_backend_watch *find_watch(wirecall_backend *backend, int fd) {
++  for (wirecall_backend_watch *watch = backend->watches; watch; watch = watch->next) {
++    if (watch->fd == fd) return watch;
++  }
++  return NULL;
++}
++
++static short poll_events(uint32_t events) {
++  short result = 0;
++  if (events & WIRECALL_BACKEND_READ) result |= POLLIN;
++  if (events & WIRECALL_BACKEND_WRITE) result |= POLLOUT;
++  return result;
++}
++
++int wirecall_backend_create(wirecall_backend **out) {
++  if (!out) return -1;
++
++  int wake[2];
++  if (pipe(wake) != 0) return -1;
++  if (set_nonblock_cloexec(wake[0]) != 0 || set_nonblock_cloexec(wake[1]) != 0) {
++    close(wake[0]);
++    close(wake[1]);
++    return -1;
++  }
++
++  wirecall_backend *backend = wirecall_mem_calloc(1, sizeof(*backend));
++  if (!backend) {
++    close(wake[0]);
++    close(wake[1]);
++    return -1;
++  }
++  backend->wake_read = wake[0];
++  backend->wake_write = wake[1];
++  *out = backend;
++  return 0;
++}
++
++void wirecall_backend_destroy(wirecall_backend *backend) {
++  if (!backend) return;
++  for (wirecall_backend_watch *watch = backend->watches; watch;) {
++    wirecall_backend_watch *next = watch->next;
++    wirecall_mem_free(watch);
++    watch = next;
++  }
++  close(backend->wake_read);
++  close(backend->wake_write);
++  wirecall_mem_free(backend);
++}
++
++int wirecall_backend_register(wirecall_backend *backend, int fd, uint32_t events, uintptr_t user) {
++  if (!backend || fd < 0) return -1;
++  wirecall_backend_watch *watch = find_watch(backend, fd);
++  if (!watch) {
++    watch = wirecall_mem_calloc(1, sizeof(*watch));
++    if (!watch) return -1;
++    watch->fd = fd;
++    watch->next = backend->watches;
++    backend->watches = watch;
++    backend->watch_count++;
++  }
++  watch->events = events;
++  watch->user = user;
++  return 0;
++}
++
++int wirecall_backend_modify(wirecall_backend *backend, int fd, uint32_t events, uintptr_t user) {
++  return wirecall_backend_register(backend, fd, events, user);
++}
++
++int wirecall_backend_remove(wirecall_backend *backend, int fd) {
++  if (!backend || fd < 0) return -1;
++  wirecall_backend_watch **link = &backend->watches;
++  while (*link) {
++    wirecall_backend_watch *watch = *link;
++    if (watch->fd == fd) {
++      *link = watch->next;
++      wirecall_mem_free(watch);
++      backend->watch_count--;
++      return 0;
++    }
++    link = &watch->next;
++  }
++  return 0;
++}
++
++int wirecall_backend_wake(wirecall_backend *backend) {
++  if (!backend) return -1;
++  uint8_t byte = 1;
++  ssize_t written = write(backend->wake_write, &byte, sizeof(byte));
++  if (written == (ssize_t)sizeof(byte) || (written < 0 && (errno == EAGAIN || errno == EWOULDBLOCK))) return 0;
++  return -1;
++}
++
++int wirecall_backend_poll(wirecall_backend *backend, wirecall_backend_event *events, int max_events, int timeout_ms) {
++  if (!backend || !events || max_events <= 0) return -1;
++
++  size_t count = backend->watch_count + 1u;
++  struct pollfd *pollfds = wirecall_mem_calloc(count, sizeof(*pollfds));
++  wirecall_backend_watch **watches = wirecall_mem_calloc(backend->watch_count, sizeof(*watches));
++  if (!pollfds || (backend->watch_count > 0 && !watches)) {
++    wirecall_mem_free(pollfds);
++    wirecall_mem_free(watches);
++    return -1;
++  }
++
++  pollfds[0] = (struct pollfd){.fd = backend->wake_read, .events = POLLIN};
++  size_t index = 1;
++  for (wirecall_backend_watch *watch = backend->watches; watch; watch = watch->next) {
++    watches[index - 1] = watch;
++    pollfds[index++] = (struct pollfd){.fd = watch->fd, .events = poll_events(watch->events)};
++  }
++
++  int ready;
++  do {
++    ready = poll(pollfds, count, timeout_ms);
++  } while (ready < 0 && errno == EINTR);
++  if (ready < 0) {
++    wirecall_mem_free(pollfds);
++    wirecall_mem_free(watches);
++    return -1;
++  }
++
++  int output = 0;
++  if (pollfds[0].revents != 0) {
++    uint8_t buffer[64];
++    while (read(backend->wake_read, buffer, sizeof(buffer)) > 0) {}
++    events[output++] = (wirecall_backend_event){.fd = -1, .events = WIRECALL_BACKEND_WAKE, .user = 0};
++  }
++  for (size_t i = 0; i < backend->watch_count && output < max_events; ++i) {
++    short revents = pollfds[i + 1].revents;
++    if (revents == 0) continue;
++    uint32_t flags = 0;
++    if (revents & (POLLIN | POLLERR | POLLHUP | POLLNVAL)) flags |= WIRECALL_BACKEND_READ;
++    if (revents & POLLOUT) flags |= WIRECALL_BACKEND_WRITE;
++    if (flags != 0) {
++      events[output++] = (wirecall_backend_event){
++        .fd = watches[i]->fd,
++        .events = flags,
++        .user = watches[i]->user,
++      };
++    }
++  }
++
++  wirecall_mem_free(pollfds);
++  wirecall_mem_free(watches);
++  return output;
++}

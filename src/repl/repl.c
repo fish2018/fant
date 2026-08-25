@@ -1,0 +1,1055 @@
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <ctype.h>
+#include <pthread.h>
+#include <signal.h>
+
+#include "ant.h"
+#include "repl.h"
+#include "readline.h"
+#include "reactor.h"
+#include "runtime.h"
+#include "internal.h"
+#include "descriptors.h"
+
+#include "silver/ast.h"
+#include "silver/engine.h"
+
+#include <crprintf.h>
+#include "modules/io.h"
+#include "highlight.h"
+#include "highlight/regex.h"
+#include "inspector.h"
+
+typedef enum {
+  CMD_OK,
+  CMD_EXIT,
+  CMD_NOT_FOUND
+} cmd_result_t;
+
+typedef struct {
+  const char *name;
+  const char *description;
+  bool has_arg;
+  cmd_result_t (*handler)(
+    ant_t *js,
+    ant_history_t *history,
+    const char *arg
+  );
+} repl_command_t;
+
+typedef struct {
+  const char **names;
+  uint32_t *lens;
+  size_t count;
+  size_t cap;
+} repl_decl_pending_t;
+
+static repl_decl_registry_t *g_repl_decl_registry = NULL;
+static void repl_read_wake_cb(uv_async_t *handle) { (void)handle; }
+static cmd_result_t cmd_help(ant_t *js, ant_history_t *history, const char *arg);
+
+typedef struct {
+  pthread_mutex_t mutex;
+  uv_async_t async;
+  ant_history_t *history;
+  const char *prompt;
+  highlight_state prefix_state;
+  repl_preview_snapshot_t *preview_snapshot;
+  ant_readline_result_t status;
+  char *line;
+  pthread_cond_t preview_cond;
+  char preview_request_line[REPL_PREVIEW_EXPR_MAX];
+  char preview_response_suffix[REPL_PREVIEW_TEXT_MAX];
+  char preview_response_text[REPL_PREVIEW_TEXT_MAX];
+  size_t preview_request_len;
+  bool done;
+  bool async_initialized;
+  bool preview_enabled;
+  bool preview_cond_initialized;
+  bool preview_request_pending;
+  bool preview_response_ready;
+} repl_read_job_t;
+
+static bool repl_read_preview_cb(
+  void *ctx,
+  const char *line,
+  size_t len,
+  char *suffix_out,
+  size_t suffix_len,
+  char *preview_out,
+  size_t preview_len
+) {
+  repl_read_job_t *job = (repl_read_job_t *)ctx;
+  if (
+    !job || !line ||
+    !suffix_out || suffix_len == 0 ||
+    !preview_out || preview_len == 0
+  ) return false;
+  suffix_out[0] = '\0';
+  preview_out[0] = '\0';
+  if (!job->preview_enabled || !job->preview_cond_initialized) return false;
+  if (len >= REPL_PREVIEW_EXPR_MAX) len = REPL_PREVIEW_EXPR_MAX - 1;
+
+  pthread_mutex_lock(&job->mutex);
+  if (!job->async_initialized || job->done) {
+    pthread_mutex_unlock(&job->mutex);
+    return false;
+  }
+
+  while (job->preview_request_pending && !job->done)
+    pthread_cond_wait(&job->preview_cond, &job->mutex);
+  if (job->done) {
+    pthread_mutex_unlock(&job->mutex);
+    return false;
+  }
+
+  memcpy(job->preview_request_line, line, len);
+  job->preview_request_line[len] = '\0';
+  job->preview_request_len = len;
+  job->preview_response_suffix[0] = '\0';
+  job->preview_response_text[0] = '\0';
+  job->preview_response_ready = false;
+  job->preview_request_pending = true;
+  if (uv_async_send(&job->async) != 0) {
+    job->preview_request_pending = false;
+    pthread_cond_broadcast(&job->preview_cond);
+    pthread_mutex_unlock(&job->mutex);
+    return false;
+  }
+
+  while (
+    job->preview_request_pending &&
+    !job->preview_response_ready &&
+    !job->done
+  ) pthread_cond_wait(&job->preview_cond, &job->mutex);
+
+  if (job->preview_response_ready) {
+    strncpy(suffix_out, job->preview_response_suffix, suffix_len - 1);
+    suffix_out[suffix_len - 1] = '\0';
+    strncpy(preview_out, job->preview_response_text, preview_len - 1);
+    preview_out[preview_len - 1] = '\0';
+  }
+  pthread_mutex_unlock(&job->mutex);
+  return suffix_out[0] != '\0' || preview_out[0] != '\0';
+}
+
+static void repl_read_job_handle_preview(ant_t *js, repl_read_job_t *job) {
+  if (!js || !job || !job->preview_cond_initialized) return;
+
+  for (;;) {
+    char line[REPL_PREVIEW_EXPR_MAX];
+    size_t len = 0;
+
+    pthread_mutex_lock(&job->mutex);
+    if (!job->preview_request_pending || job->preview_response_ready) {
+      pthread_mutex_unlock(&job->mutex);
+      return;
+    }
+    len = job->preview_request_len;
+    memcpy(line, job->preview_request_line, len + 1);
+    pthread_mutex_unlock(&job->mutex);
+
+    char suffix[REPL_PREVIEW_TEXT_MAX];
+    char preview[REPL_PREVIEW_TEXT_MAX];
+    repl_preview_compute(
+      js, job->preview_snapshot, line, len,
+      suffix, sizeof(suffix), preview, sizeof(preview)
+    );
+
+    pthread_mutex_lock(&job->mutex);
+    strncpy(job->preview_response_suffix, suffix, sizeof(job->preview_response_suffix) - 1);
+    job->preview_response_suffix[sizeof(job->preview_response_suffix) - 1] = '\0';
+    strncpy(job->preview_response_text, preview, sizeof(job->preview_response_text) - 1);
+    job->preview_response_text[sizeof(job->preview_response_text) - 1] = '\0';
+    job->preview_response_ready = true;
+    job->preview_request_pending = false;
+    pthread_cond_broadcast(&job->preview_cond);
+    pthread_mutex_unlock(&job->mutex);
+  }
+}
+
+static void repl_read_async_close_cb(uv_handle_t *handle) {
+  repl_read_job_t *job = (repl_read_job_t *)handle->data;
+  if (job) job->async_initialized = false;
+}
+
+static void *repl_read_thread_main(void *data) {
+  repl_read_job_t *job = (repl_read_job_t *)data;
+  char *line = NULL;
+
+#ifndef _WIN32
+  sigset_t sigint_set;
+  sigemptyset(&sigint_set);
+  sigaddset(&sigint_set, SIGINT);
+  pthread_sigmask(SIG_UNBLOCK, &sigint_set, NULL);
+#endif
+
+  ant_readline_result_t status = ant_readline_with_preview(
+    job->history, job->prompt,
+    job->prefix_state,
+    job->preview_enabled ? repl_read_preview_cb : NULL,
+    job,
+    &line
+  );
+
+  pthread_mutex_lock(&job->mutex);
+  job->status = status;
+  job->line = line;
+  job->done = true;
+  if (job->preview_cond_initialized)
+    pthread_cond_broadcast(&job->preview_cond);
+  pthread_mutex_unlock(&job->mutex);
+
+  if (job->async_initialized) uv_async_send(&job->async);
+  return NULL;
+}
+
+static bool repl_read_job_is_done(repl_read_job_t *job) {
+  bool done;
+  pthread_mutex_lock(&job->mutex);
+  done = job->done;
+  pthread_mutex_unlock(&job->mutex);
+  return done;
+}
+
+static ant_readline_result_t repl_readline_async(
+  ant_t *js,
+  const repl_decl_registry_t *decl_registry,
+  ant_history_t *history,
+  const char *prompt,
+  highlight_state prefix_state,
+  char **out_line
+) {
+  repl_read_job_t job = {
+    .history = history,
+    .prompt = prompt,
+    .prefix_state = prefix_state,
+    .preview_snapshot = NULL,
+    .status = ANT_READLINE_EOF,
+    .line = NULL,
+    .preview_request_len = 0,
+    .done = false,
+    .async_initialized = false,
+    .preview_enabled = true,
+    .preview_cond_initialized = false,
+    .preview_request_pending = false,
+    .preview_response_ready = false,
+  };
+  repl_preview_snapshot_t preview_snapshot = {0};
+
+  pthread_t thread;
+#ifndef _WIN32
+  sigset_t sigint_set;
+  sigset_t old_sigmask;
+  bool sigint_blocked = false;
+#endif
+
+  if (out_line) *out_line = NULL;
+  if (repl_preview_snapshot_build(js, decl_registry, &preview_snapshot))
+    job.preview_snapshot = &preview_snapshot;
+  else job.preview_enabled = false;
+
+  if (pthread_mutex_init(&job.mutex, NULL) != 0) {
+    repl_preview_snapshot_free(&preview_snapshot);
+    return ant_readline(history, prompt, prefix_state, out_line);
+  }
+
+  if (pthread_cond_init(&job.preview_cond, NULL) != 0) {
+    pthread_mutex_destroy(&job.mutex);
+    repl_preview_snapshot_free(&preview_snapshot);
+    return ant_readline(history, prompt, prefix_state, out_line);
+  }
+  job.preview_cond_initialized = true;
+
+  if (uv_async_init(uv_default_loop(), &job.async, repl_read_wake_cb) != 0) {
+    pthread_cond_destroy(&job.preview_cond);
+    pthread_mutex_destroy(&job.mutex);
+    repl_preview_snapshot_free(&preview_snapshot);
+    return ant_readline(history, prompt, prefix_state, out_line);
+  }
+  job.async.data = &job;
+  job.async_initialized = true;
+
+#ifndef _WIN32
+  sigemptyset(&sigint_set);
+  sigaddset(&sigint_set, SIGINT);
+  sigint_blocked = pthread_sigmask(SIG_BLOCK, &sigint_set, &old_sigmask) == 0;
+#endif
+
+  if (pthread_create(&thread, NULL, repl_read_thread_main, &job) != 0) {
+#ifndef _WIN32
+    if (sigint_blocked) pthread_sigmask(SIG_SETMASK, &old_sigmask, NULL);
+#endif
+    if (job.async_initialized)
+      uv_close((uv_handle_t *)&job.async, repl_read_async_close_cb);
+    while (job.async_initialized) uv_run(uv_default_loop(), UV_RUN_ONCE);
+    pthread_cond_destroy(&job.preview_cond);
+    pthread_mutex_destroy(&job.mutex);
+    repl_preview_snapshot_free(&preview_snapshot);
+    return ant_readline(history, prompt, prefix_state, out_line);
+  }
+
+  while (!repl_read_job_is_done(&job)) {
+    repl_read_job_handle_preview(js, &job);
+    js_reactor_pump_repl_nowait(js);
+    uv_run(uv_default_loop(), UV_RUN_ONCE);
+    repl_read_job_handle_preview(js, &job);
+  }
+  repl_read_job_handle_preview(js, &job);
+
+  pthread_join(thread, NULL);
+#ifndef _WIN32
+  if (sigint_blocked) pthread_sigmask(SIG_SETMASK, &old_sigmask, NULL);
+#endif
+
+  if (job.async_initialized)
+    uv_close((uv_handle_t *)&job.async, repl_read_async_close_cb);
+  while (job.async_initialized) uv_run(uv_default_loop(), UV_RUN_ONCE);
+
+  pthread_mutex_lock(&job.mutex);
+  ant_readline_result_t status = job.status;
+  char *line = job.line;
+  pthread_mutex_unlock(&job.mutex);
+  pthread_cond_destroy(&job.preview_cond);
+  pthread_mutex_destroy(&job.mutex);
+  repl_preview_snapshot_free(&preview_snapshot);
+
+  if (out_line) *out_line = line;
+  else free(line);
+  return status;
+}
+
+static inline void repl_clear_exception_state(ant_t *js) {
+  js->thrown_exists = false;
+  js->thrown_value = js_mkundef();
+}
+
+static void repl_decl_registry_free(repl_decl_registry_t *reg) {
+  if (!reg) return;
+  for (size_t i = 0; i < reg->count; i++)
+    free(reg->items[i].name);
+  free(reg->items);
+  reg->items = NULL;
+  reg->count = 0;
+  reg->cap = 0;
+}
+
+static bool repl_decl_registry_contains(
+  const repl_decl_registry_t *reg,
+  const char *name, uint32_t len
+) {
+  if (!reg || !name) return false;
+  for (size_t i = 0; i < reg->count; i++) if (
+    reg->items[i].len == (size_t)len
+    && memcmp(reg->items[i].name, name, (size_t)len) == 0
+  ) return true;
+  return false;
+}
+
+static bool repl_decl_registry_add(
+  ant_t *js, repl_decl_registry_t *reg,
+  const char *name, uint32_t len
+) {
+  if (!reg || !name) return true;
+  if (repl_decl_registry_contains(reg, name, len)) return true;
+
+  if (reg->count >= reg->cap) {
+    size_t new_cap = reg->cap ? reg->cap * 2 : 32;
+    repl_decl_name_t *ni = realloc(reg->items, new_cap * sizeof(*ni));
+    if (!ni) {
+      js_mkerr_typed(js, JS_ERR_INTERNAL | JS_ERR_NO_STACK, "out of memory");
+      return false;
+    }
+    reg->items = ni;
+    reg->cap = new_cap;
+  }
+
+  char *copy = malloc((size_t)len + 1);
+  if (!copy) {
+    js_mkerr_typed(js, JS_ERR_INTERNAL | JS_ERR_NO_STACK, "out of memory");
+    return false;
+  }
+
+  memcpy(copy, name, (size_t)len);
+  copy[len] = '\0';
+  reg->items[reg->count++] = (repl_decl_name_t){ .name = copy, .len = (size_t)len };
+
+  return true;
+}
+
+static void repl_decl_pending_free(repl_decl_pending_t *p) {
+  if (!p) return;
+  free(p->names);
+  free(p->lens);
+  p->names = NULL;
+  p->lens = NULL;
+  p->count = 0;
+  p->cap = 0;
+}
+
+static bool repl_decl_pending_contains(
+  const repl_decl_pending_t *p,
+  const char *name, uint32_t len
+) {
+  if (!p || !name) return false;
+  for (size_t i = 0; i < p->count; i++)
+    if (p->lens[i] == len && memcmp(p->names[i], name, (size_t)len) == 0) return true;
+  return false;
+}
+
+static bool repl_decl_pending_push(
+  ant_t *js, repl_decl_pending_t *p,
+  const char *name, uint32_t len
+) {
+  if (!p || !name || len == 0) return true;
+  if (repl_decl_pending_contains(p, name, len)) return true;
+  if (p->count >= p->cap) {
+    size_t new_cap = p->cap ? p->cap * 2 : 16;
+    const char **nn = realloc(p->names, new_cap * sizeof(*nn));
+    if (!nn) {
+      js_mkerr_typed(js, JS_ERR_INTERNAL | JS_ERR_NO_STACK, "out of memory");
+      return false;
+    }
+    uint32_t *nl = realloc(p->lens, new_cap * sizeof(*nl));
+    if (!nl) {
+      p->names = nn;
+      js_mkerr_typed(js, JS_ERR_INTERNAL | JS_ERR_NO_STACK, "out of memory");
+      return false;
+    }
+    p->names = nn;
+    p->lens = nl;
+    p->cap = new_cap;
+  }
+  p->names[p->count] = name;
+  p->lens[p->count] = len;
+  p->count++;
+  return true;
+}
+
+static bool repl_collect_pattern_names(ant_t *js, sv_ast_t *pat, repl_decl_pending_t *p) {
+  if (!pat) return true;
+  switch (pat->type) {
+    case N_IDENT:
+      return repl_decl_pending_push(js, p, pat->str, pat->len);
+    case N_ASSIGN_PAT:
+    case N_ASSIGN:
+      return repl_collect_pattern_names(js, pat->left, p);
+    case N_REST:
+    case N_SPREAD:
+      return repl_collect_pattern_names(js, pat->right, p);
+    case N_ARRAY:
+    case N_ARRAY_PAT:
+      for (int i = 0; i < pat->args.count; i++) {
+        if (!repl_collect_pattern_names(js, pat->args.items[i], p)) return false;
+      }
+      return true;
+    case N_OBJECT:
+    case N_OBJECT_PAT:
+      for (int i = 0; i < pat->args.count; i++) {
+        sv_ast_t *prop = pat->args.items[i];
+        if (!prop) continue;
+        if (prop->type == N_PROPERTY) {
+          if (!repl_collect_pattern_names(js, prop->right, p)) return false;
+        } else if (prop->type == N_REST || prop->type == N_SPREAD) {
+          if (!repl_collect_pattern_names(js, prop->right, p)) return false;
+        }
+      }
+      return true;
+    default: return true;
+  }
+}
+
+static bool repl_collect_top_level_decls(ant_t *js, sv_ast_t *stmt, repl_decl_pending_t *p) {
+  if (!stmt) return true;
+  sv_ast_t *node = (stmt->type == N_EXPORT) ? stmt->left : stmt;
+  if (!node) return true;
+
+  if (node->type == N_VAR && node->var_kind != SV_VAR_VAR) {
+    for (int i = 0; i < node->args.count; i++) {
+      sv_ast_t *decl = node->args.items[i];
+      if (!decl || decl->type != N_VARDECL || !decl->left) continue;
+      if (!repl_collect_pattern_names(js, decl->left, p)) return false;
+    }
+    return true;
+  }
+
+  if (node->type == N_CLASS && node->str && node->len > 0)
+    return repl_decl_pending_push(js, p, node->str, node->len);
+
+  if (node->type == N_IMPORT_DECL) {
+    for (int i = 0; i < node->args.count; i++) {
+      sv_ast_t *spec = node->args.items[i];
+      if (!spec || spec->type != N_IMPORT_SPEC || !spec->right) continue;
+      if (spec->right->type != N_IDENT) continue;
+      if (!repl_decl_pending_push(js, p, spec->right->str, spec->right->len)) return false;
+    }
+  }
+
+  return true;
+}
+
+static bool repl_precheck_and_commit_lexicals(
+  ant_t *js, repl_decl_registry_t *reg,
+  const char *code, size_t len
+) {
+  if (!js || !reg || !code || len == 0) return true;
+
+  code_arena_mark_t mark = parse_arena_mark();
+  repl_decl_pending_t pending = {0};
+  bool ok = true;
+
+  repl_clear_exception_state(js);
+  sv_ast_t *program = sv_parse(js, code, (ant_offset_t)len, false);
+
+  if (!program || js->thrown_exists) {
+    ok = true;
+    goto done;
+  }
+
+  for (int i = 0; i < program->args.count; i++) {
+    if (
+      !repl_collect_top_level_decls(
+      js, program->args.items[i], &pending)
+    ) { ok = false; goto done; }
+  }
+
+  for (size_t i = 0; i < pending.count; i++) {
+    if (repl_decl_registry_contains(reg, pending.names[i], pending.lens[i])) {
+      js_mkerr_typed(
+        js, JS_ERR_SYNTAX, "Identifier '%.*s' has already been declared",
+        (int)pending.lens[i], pending.names[i]
+      );
+      ok = false; goto done;
+    }
+  }
+
+  for (size_t i = 0; i < pending.count; i++) {
+    if (
+      !repl_decl_registry_add(
+      js, reg, pending.names[i], pending.lens[i])
+    ) { ok = false; goto done; }
+  }
+
+done:
+  parse_arena_rewind(mark);
+  repl_decl_pending_free(&pending);
+
+  if (ok && js->thrown_exists)
+    repl_clear_exception_state(js);
+
+  return ok;
+}
+
+typedef enum {
+  REPL_PRINT_INTERACTIVE,
+  REPL_PRINT_LOAD,
+  REPL_PRINT_STARTUP,
+} repl_print_mode_t;
+
+typedef enum {
+  REPL_EVAL_COMPLETED,
+  REPL_EVAL_INTERRUPTED,
+} repl_eval_status_t;
+
+static bool repl_eval_interrupt_pending(void *ctx) {
+  (void)ctx;
+  return ant_readline_interrupt_pending();
+}
+
+static repl_eval_status_t repl_evaluate(
+  ant_t *js, const char *code, size_t len, ant_value_t *result_out
+) {
+  js_eval_result_t evaluation = js_eval_bytecode_repl(js, code, len);
+  ant_value_t result = evaluation.value;
+
+  if (evaluation.kind == JS_EVAL_ASYNC_ENTRY && !js->thrown_exists) {
+    js_reactor_await_status_t await_status = js_reactor_blocking_await_promise(
+      js, result, &result, 
+      repl_eval_interrupt_pending, NULL
+    );
+    if (await_status == JS_REACTOR_AWAIT_INTERRUPTED) {
+      (void)js_eval_async_entry_cancel(evaluation.async_entry);
+      js_eval_async_entry_release(evaluation.async_entry);
+      ant_readline_clear_interrupt();
+      return REPL_EVAL_INTERRUPTED;
+    }
+    js_eval_async_entry_release(evaluation.async_entry);
+    if (await_status == JS_REACTOR_AWAIT_REJECTED) js_throw(js, result);
+    else if (await_status == JS_REACTOR_AWAIT_INVALID) result = js_mkerr(js, "invalid top-level await completion");
+  } else {
+    js_eval_async_entry_release(evaluation.async_entry);
+    js_reactor_pump_repl_nowait(js);
+  }
+
+  if (result_out) *result_out = result;
+  return REPL_EVAL_COMPLETED;
+}
+
+static void repl_eval_chunk(
+  ant_t *js, repl_decl_registry_t *decl_registry,
+  const char *code, size_t len,
+  repl_print_mode_t print_mode
+) {
+  if (!repl_precheck_and_commit_lexicals(js, decl_registry, code, len)) {
+    if (js->thrown_exists) js_set(js, js_glob(js), "_error", js->thrown_value);
+    print_uncaught_throw(js);
+    return;
+  }
+
+  repl_clear_exception_state(js);
+  ant_value_t result = js_mkundef();
+  if (repl_evaluate(js, code, len, &result) == REPL_EVAL_INTERRUPTED) {
+    fputs("^C\n", stdout);
+    return;
+  }
+
+  if (js->thrown_exists) {
+    js_set(js, js_glob(js), "_error", js->thrown_value);
+    if (print_uncaught_throw(js)) return;
+  }
+
+  if (print_mode == REPL_PRINT_INTERACTIVE) {
+    js_set(js, js_glob(js), "_", result);
+    print_repl_value(js, result, stdout);
+    return;
+  }
+
+  if (print_mode == REPL_PRINT_LOAD) {
+    if (vtype(result) == T_ERR) fprintf(stderr, "%s\n", js_str(js, result));
+    else if (vtype(result) != T_UNDEF) printf("%s\n", js_str(js, result));
+  }
+}
+
+static const char *repl_command_usage(const repl_command_t *cmd) {
+  if (!cmd || !cmd->name) return "";
+  if (strcmp(cmd->name, "copy") == 0)    return ".copy [expr]";
+  if (strcmp(cmd->name, "load") == 0)    return ".load <file>";
+  if (strcmp(cmd->name, "save") == 0)    return ".save <file>";
+  if (strcmp(cmd->name, "history") == 0) return ".history";
+  if (strcmp(cmd->name, "clear") == 0)   return ".clear";
+  if (strcmp(cmd->name, "stats") == 0)   return ".stats";
+  if (strcmp(cmd->name, "exit") == 0)    return ".exit";
+  if (strcmp(cmd->name, "help") == 0)    return ".help";
+  return cmd->name;
+}
+
+static cmd_result_t cmd_exit(ant_t *js, ant_history_t *history, const char *arg) {
+  return CMD_EXIT;
+}
+
+static cmd_result_t cmd_load(ant_t *js, ant_history_t *history, const char *arg) {
+  if (!arg || *arg == '\0') {
+    fprintf(stderr, "Usage: .load <filename>\n");
+    return CMD_OK;
+  }
+
+  FILE *fp = fopen(arg, "r");
+  if (fp == NULL) {
+    fprintf(stderr, "Failed to open file: %s\n", arg);
+    return CMD_OK;
+  }
+
+  fseek(fp, 0, SEEK_END);
+  long file_size = ftell(fp);
+  fseek(fp, 0, SEEK_SET);
+
+  char *file_buffer = malloc(file_size + 1);
+  if (file_buffer) {
+    size_t len = fread(file_buffer, 1, file_size, fp);
+    file_buffer[len] = '\0';
+    repl_eval_chunk(
+      js, g_repl_decl_registry,
+      file_buffer, len, REPL_PRINT_LOAD
+    );
+    free(file_buffer);
+  }
+
+  fclose(fp);
+  return CMD_OK;
+}
+
+static cmd_result_t cmd_save(ant_t *js, ant_history_t *history, const char *arg) {
+  if (!arg || *arg == '\0') {
+    fprintf(stderr, "Usage: .save <filename>\n");
+    return CMD_OK;
+  }
+
+  FILE *fp = fopen(arg, "w");
+  if (fp == NULL) {
+    fprintf(stderr, "Failed to open file for writing: %s\n", arg);
+    return CMD_OK;
+  }
+
+  for (int i = 0; i < history->count; i++)
+    fprintf(fp, "%s\n", history->lines[i]);
+
+  fclose(fp);
+  printf("Session saved to %s\n", arg);
+
+  return CMD_OK;
+}
+
+static cmd_result_t cmd_stats(ant_t *js, ant_history_t *history, const char *arg) {
+  ant_value_t stats_fn = js_get(js, js->Ant, "stats");
+  ant_value_t result = sv_vm_call(js->vm, js, stats_fn, js_mkundef(), NULL, 0, NULL, false);
+  console_emit(js, false, NULL, &result, 1);
+  return CMD_OK;
+}
+
+static cmd_result_t cmd_clear(ant_t *js, ant_history_t *history, const char *arg) {
+  fputs("\033[2J\033[H", stdout);
+  fflush(stdout);
+  return CMD_OK;
+}
+
+static cmd_result_t cmd_history(ant_t *js, ant_history_t *history, const char *arg) {
+  for (int i = 0; i < history->count; i++)
+    printf("%4d  %s\n", i + 1, history->lines[i]);
+  return CMD_OK;
+}
+
+#ifdef _WIN32
+static bool repl_copy_with_command(const char *data, size_t len) {
+  FILE *pipe = _popen("clip", "wb");
+  if (!pipe) return false;
+
+  size_t written = fwrite(data, 1, len, pipe);
+  int close_rc = _pclose(pipe);
+  return written == len && close_rc == 0;
+}
+#else
+static bool repl_copy_with_single_command(const char *cmd, const char *data, size_t len) {
+  FILE *pipe = popen(cmd, "w");
+  if (!pipe) return false;
+
+  size_t written = fwrite(data, 1, len, pipe);
+  int close_rc = pclose(pipe);
+  return written == len && close_rc == 0;
+}
+
+static bool repl_copy_with_command(const char *data, size_t len) {
+  static const char *cmds[] = {
+    "pbcopy",
+    "wl-copy",
+    "xclip -selection clipboard",
+    "xsel --clipboard --input",
+  };
+  for (size_t i = 0; i < sizeof(cmds) / sizeof(cmds[0]); i++)
+    if (repl_copy_with_single_command(cmds[i], data, len)) return true;
+  return false;
+}
+#endif
+
+static cmd_result_t cmd_copy(ant_t *js, ant_history_t *history, const char *arg) {
+  if (!arg || *arg == '\0') {
+    fprintf(stderr, "Usage: .copy <expression>\n");
+    return CMD_OK;
+  }
+
+  repl_clear_exception_state(js);
+  ant_value_t result = js_mkundef();
+  if (repl_evaluate(js, arg, strlen(arg), &result) == REPL_EVAL_INTERRUPTED) {
+    fputs("^C\n", stdout);
+    return CMD_OK;
+  }
+
+  if (js->thrown_exists) {
+    js_set(js, js_glob(js), "_error", js->thrown_value);
+    if (print_uncaught_throw(js)) return CMD_OK;
+  }
+
+  js_set(js, js_glob(js), "_", result); char cbuf[512];
+  js_cstr_t cstr = js_to_cstr(js, result, cbuf, sizeof(cbuf));
+
+  bool copied_command = repl_copy_with_command(cstr.ptr, cstr.len);
+  if (cstr.needs_free) free((void *)cstr.ptr);
+
+  if (!copied_command) {
+    fprintf(stderr, "Failed to copy to clipboard (no clipboard command available).\n");
+    return CMD_OK;
+  }
+
+  printf("Copied to clipboard.\n");
+  return CMD_OK;
+}
+
+static const repl_command_t commands[] = {
+  { "help",    "Show this help message",                                     false, cmd_help    },
+  { "exit",    "Exit the REPL",                                              false, cmd_exit    },
+  { "clear",   "Clear the screen",                                           false, cmd_clear   },
+  { "history", "Show command history",                                       false, cmd_history },
+  { "load",    "Load JS from a file into the REPL session",                  true,  cmd_load    },
+  { "save",    "Save all evaluated commands in this REPL session to a file", true,  cmd_save    },
+  { "stats",   "Show memory statistics",                                     false, cmd_stats   },
+  { "copy",    "Evaluate expression and copy its value",                     true,  cmd_copy    },
+  { NULL, NULL, false, NULL }
+};
+
+static cmd_result_t cmd_help(ant_t *js, ant_history_t *history, const char *arg) {
+  printf("\n%sREPL Commands:%s\n", C_BOLD, C_RESET);
+  for (const repl_command_t *cmd = commands; cmd->name; cmd++) {
+    const char *usage = repl_command_usage(cmd);
+    printf("  %s%-12s%s %s\n", C_CYAN, usage, C_RESET, cmd->description);
+  }
+  printf("\n%sKeybindings:%s\n", C_BOLD, C_RESET);
+  printf("  Ctrl+C       Abort current expression (press twice to exit)\n");
+  printf("  Left/Right   Move backward/forward one character\n");
+  printf("  Home/End     Jump to start/end of line\n");
+  printf("  Up/Down      Navigate history\n");
+  printf("  Backspace    Delete character backward\n");
+  printf("  Delete       Delete character under cursor\n");
+  printf("  Enter        Submit input\n");
+  printf("\n%sSpecial Variables:%s\n", C_BOLD, C_RESET);
+  printf("  %s_%s           Last expression result\n", C_CYAN, C_RESET);
+  printf("  %s_error%s      Last error\n\n", C_CYAN, C_RESET);
+  return CMD_OK;
+}
+
+static cmd_result_t execute_command(ant_t *js, ant_history_t *history, const char *line) {
+  const char *cmd_start = line + 1;
+
+  for (const repl_command_t *cmd = commands; cmd->name; cmd++) {
+    size_t n = strlen(cmd->name);
+    if (strncmp(cmd_start, cmd->name, n) != 0) continue;
+
+    char next = cmd_start[n];
+    if (cmd->has_arg && (next == ' ' || next == '\0')) {
+      const char *arg = cmd_start + n;
+      while (*arg == ' ') arg++;
+      return cmd->handler(js, history, arg);
+    }
+    if (!cmd->has_arg && next == '\0') return cmd->handler(js, history, NULL);
+  }
+
+  return CMD_NOT_FOUND;
+}
+
+typedef struct {
+  int paren, bracket, brace;
+  int *templates;
+  int template_count, template_cap;
+  char string_char;
+  bool in_string, escaped;
+  char last_code_char;
+} parse_state_t;
+
+static void push_template(parse_state_t *s) {
+  if (s->template_count >= s->template_cap) {
+    s->template_cap = s->template_cap ? s->template_cap * 2 : 8;
+    int *new_templates = realloc(s->templates, s->template_cap * sizeof(int));
+    if (!new_templates) { return; } s->templates = new_templates;
+  }
+  s->templates[s->template_count++] = s->brace;
+}
+
+static bool in_template_text(parse_state_t *s) {
+  return s->template_count > 0 && s->brace == s->templates[s->template_count - 1];
+}
+
+static bool is_incomplete_input(const char *code, size_t len) {
+  parse_state_t s = {0};
+
+  for (size_t i = 0; i < len; i++) {
+    char c = code[i];
+
+    if (s.escaped) { s.escaped = false; continue; }
+    if (c == '\\' && (s.in_string || s.template_count > 0)) { s.escaped = true; continue; }
+    if (s.in_string) { if (c == s.string_char) s.in_string = false; continue; }
+
+    if (in_template_text(&s)) {
+      if (c == '`') s.template_count--;
+      else if (c == '$' && i + 1 < len && code[i + 1] == '{') { s.brace++; i++; }
+      continue;
+    }
+
+    if (c == '/' && i + 1 < len) {
+      if (code[i + 1] == '/') { while (i < len && code[i] != '\n') i++; continue; }
+      if (code[i + 1] == '*') {
+        for (i += 2; i + 1 < len && !(code[i] == '*' && code[i + 1] == '/'); i++);
+        if (i + 1 >= len) { free(s.templates); return true; }
+        i++; continue;
+      }
+      if (js_regex_can_start(code, i)) {
+        size_t regex_end = 0;
+        if (!js_scan_regex_literal(code, len, i, &regex_end)) { free(s.templates); return true; }
+        i = regex_end - 1;
+        continue;
+      }
+    }
+
+    switch (c) {
+      case '"': case '\'': s.in_string = true; s.string_char = c; break;
+      case '`': push_template(&s); break;
+      case '(': s.paren++; break;   case ')': s.paren--; break;
+      case '[': s.bracket++; break; case ']': s.bracket--; break;
+      case '{': s.brace++; break;   case '}': s.brace--; break;
+    }
+    if (!isspace((unsigned char)c)) s.last_code_char = c;
+  }
+
+  bool incomplete =
+    s.in_string || s.template_count > 0 ||
+    s.paren > 0 || s.bracket > 0 || s.brace > 0 ||
+    s.last_code_char == ',';
+
+  free(s.templates);
+  return incomplete;
+}
+
+void ant_repl_run(ant_t *js, const char *startup_code) {
+  ant_readline_install_signal_handler();
+
+  js_set_filename(js, "[repl]");
+  js_setup_import_meta(js, "[repl]");
+
+  if (!startup_code) crprintf(
+    "Welcome to <red+bold>Ant JavaScript</> v%s\n"
+    "Type <cyan>.copy [code]</cyan> to copy, <cyan>.help</cyan> for more information.\n\n",
+    ANT_VERSION
+  );
+
+  ant_history_t history;
+  ant_history_init(&history, 512);
+  ant_history_load(&history);
+
+  repl_decl_registry_t decl_registry = {0};
+  g_repl_decl_registry = &decl_registry;
+
+  js_set_global_builtin(js, "__dirname", js_mkstr(js, ".", 1));
+  js_set_global_builtin(js, "__filename", js_mkstr(js, "[repl]", 6));
+
+  js_set(js, js_glob(js), "_", js_mkundef());
+  js_set(js, js_glob(js), "_error", js_mkundef());
+
+  js_set_descriptor(js, js_as_obj(js_glob(js)), "_", 1, JS_DESC_W | JS_DESC_C);
+  js_set_descriptor(js, js_as_obj(js_glob(js)), "_error", 6, JS_DESC_W | JS_DESC_C);
+
+  if (startup_code) repl_eval_chunk(
+    js, &decl_registry,
+    startup_code, strlen(startup_code),
+    REPL_PRINT_STARTUP
+  );
+
+  int prev_ctrl_c_count = 0;
+  char *multiline_buf = NULL;
+  size_t multiline_len = 0;
+  size_t multiline_cap = 0;
+
+  while (1) {
+    const char *prompt = multiline_buf ? "\x1b[2m|\x1b[0m " : "\x1b[2m❯\x1b[0m ";
+    highlight_state prefix_state = HL_STATE_INIT;
+    if (multiline_buf && multiline_len > 0) {
+      char scratch[8192];
+      ant_highlight_stateful(multiline_buf, multiline_len, scratch, sizeof(scratch), &prefix_state);
+    }
+
+    fputs(prompt, stdout);
+    fflush(stdout);
+
+    char *line = NULL;
+    ant_readline_result_t readline_status =
+      repl_readline_async(js, &decl_registry, &history, prompt, prefix_state, &line);
+
+    if (readline_status == ANT_READLINE_INTERRUPT) {
+      if (multiline_buf) {
+        free(multiline_buf);
+        multiline_buf = NULL;
+        multiline_len = 0;
+        multiline_cap = 0;
+        prev_ctrl_c_count = 0;
+        if (line) free(line);
+        continue;
+      }
+      if (prev_ctrl_c_count > 0) {
+        if (line) free(line);
+        break;
+      }
+      printf("(To exit, press Ctrl+C again or type .exit)\n");
+      prev_ctrl_c_count++;
+      if (line) free(line);
+      continue;
+    }
+
+    if (readline_status == ANT_READLINE_EOF || line == NULL) {
+      if (multiline_buf) {
+        free(multiline_buf);
+        multiline_buf = NULL;
+        multiline_len = 0;
+        multiline_cap = 0;
+        continue;
+      }
+      break;
+    }
+
+    prev_ctrl_c_count = 0;
+    size_t line_len = strlen(line);
+
+    if (line_len == 0 && multiline_buf) {
+      if (multiline_len + 1 >= multiline_cap) {
+        multiline_cap = multiline_cap ? multiline_cap * 2 : 256;
+        multiline_buf = realloc(multiline_buf, multiline_cap);
+      }
+      multiline_buf[multiline_len++] = '\n';
+      multiline_buf[multiline_len] = '\0';
+      free(line);
+      continue;
+    }
+
+    if (line_len == 0) {
+      free(line);
+      continue;
+    }
+
+    if (!multiline_buf && line[0] == '.') {
+      cmd_result_t result = execute_command(js, &history, line);
+      if (result == CMD_EXIT) {
+        free(line);
+        break;
+      } else if (result == CMD_NOT_FOUND) {
+        printf("Unknown command: %s\n", line);
+        printf("Type \".help\" for more information.\n");
+      }
+      free(line);
+      continue;
+    }
+
+    size_t new_len = multiline_len + line_len + 1;
+    if (new_len >= multiline_cap || !multiline_buf) {
+      multiline_cap = multiline_cap ? multiline_cap * 2 : 256;
+      if (multiline_cap < new_len + 1) multiline_cap = new_len + 1;
+      multiline_buf = realloc(multiline_buf, multiline_cap);
+    }
+
+    if (multiline_len > 0)
+      multiline_buf[multiline_len++] = '\n';
+
+    memcpy(multiline_buf + multiline_len, line, line_len);
+    multiline_len += line_len;
+    multiline_buf[multiline_len] = '\0';
+    free(line);
+
+    if (is_incomplete_input(multiline_buf, multiline_len)) continue;
+    ant_history_add(&history, multiline_buf);
+
+    repl_eval_chunk(
+      js, &decl_registry, multiline_buf,
+      multiline_len, REPL_PRINT_INTERACTIVE
+    );
+
+    free(multiline_buf);
+    multiline_buf = NULL;
+    multiline_len = 0;
+    multiline_cap = 0;
+  }
+
+  if (multiline_buf) free(multiline_buf);
+  ant_readline_shutdown();
+
+  repl_decl_registry_free(&decl_registry);
+  g_repl_decl_registry = NULL;
+
+  ant_history_save(&history);
+  ant_history_free(&history);
+}

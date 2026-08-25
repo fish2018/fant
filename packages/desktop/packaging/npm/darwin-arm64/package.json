@@ -1,0 +1,49 @@
+{
+  "name": "ant-desktop-darwin-arm64",
+  "version": "0.3.0",
+  "description": "Ant Desktop native runtime for macOS on Apple Silicon",
+  "keywords": [
+    "ant",
+    "desktop",
+    "macos",
+    "apple-silicon",
+    "arm64",
+    "chromium",
+    "native"
+  ],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/fish2018/fant.git",
+    "directory": "packages/desktop/packaging/npm/darwin-arm64"
+  },
+  "type": "module",
+  "main": "index.cjs",
+  "os": [
+    "darwin"
+  ],
+  "cpu": [
+    "arm64"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "files": [
+    "dev.cjs",
+    "index.cjs",
+    "install.cjs",
+    "package.cjs",
+    "renderer.cjs",
+    "runtime.lock.json",
+    "artifacts/ant-desktop-darwin-arm64.tar.gz",
+    "artifacts/ant-desktop-darwin-arm64.tar.gz.sha256",
+    "README.md"
+  ],
+  "scripts": {
+    "postinstall": "node install.cjs",
+    "prepack": "node ../../../scripts/package-platform.cjs"
+  },
+  "publishConfig": {
+    "access": "public"
+  }
+}

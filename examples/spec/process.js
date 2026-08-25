@@ -1,0 +1,284 @@
+import { test, summary } from './helpers.js';
+import nodeProcess, { cwd as nodeCwd, execPath as nodeExecPath, hrtime as nodeHrtime, stdout as nodeStdout } from 'node:process';
+
+console.log('Process Tests\n');
+
+test('process exists', typeof process, 'object');
+test('node:process default is global process', nodeProcess, process);
+test('node:process named cwd is function', typeof nodeCwd, 'function');
+test('node:process named execPath is string', typeof nodeExecPath, 'string');
+test('node:process named hrtime is function', typeof nodeHrtime, 'function');
+test('node:process named hrtime.bigint is function', typeof nodeHrtime.bigint, 'function');
+test('node:process named hrtime matches process.hrtime', nodeHrtime, process.hrtime);
+test('node:process named stdout is global stdout', nodeStdout, process.stdout);
+test('process toStringTag', Object.prototype.toString.call(process), '[object process]');
+test('process inherits Object.prototype methods', typeof process.hasOwnProperty, 'function');
+
+test('pid is number', typeof process.pid, 'number');
+test('pid is positive', process.pid > 0, true);
+
+test('platform is string', typeof process.platform, 'string');
+test('platform valid', ['android', 'darwin', 'linux', 'win32', 'freebsd'].includes(process.platform), true);
+
+test('arch is string', typeof process.arch, 'string');
+test('arch valid', ['x64', 'ia32', 'arm64', 'arm'].includes(process.arch), true);
+
+test('argv is array', Array.isArray(process.argv), true);
+test('argv has entries', process.argv.length >= 1, true);
+test('execArgv is array', Array.isArray(process.execArgv), true);
+test('argv0 is string', typeof process.argv0, 'string');
+test('execPath is string', typeof process.execPath, 'string');
+test('ppid is number', typeof process.ppid, 'number');
+test('ppid is positive', process.ppid > 0, true);
+
+test('cwd is function', typeof process.cwd, 'function');
+const cwd = process.cwd();
+test('cwd returns string', typeof cwd, 'string');
+test('cwd not empty', cwd.length > 0, true);
+
+test('env is object', typeof process.env, 'object');
+test('env inherits Object.prototype methods', typeof process.env.hasOwnProperty, 'function');
+test('env has PATH or Path', process.env.PATH !== undefined || process.env.Path !== undefined, true);
+
+test('exit is function', typeof process.exit, 'function');
+
+test('on is function', typeof process.on, 'function');
+test('once is function', typeof process.once, 'function');
+test('off is function', typeof process.off, 'function');
+test('addListener is function', typeof process.addListener, 'function');
+test('removeListener is function', typeof process.removeListener, 'function');
+test('removeAllListeners is function', typeof process.removeAllListeners, 'function');
+test('emit is function', typeof process.emit, 'function');
+test('listenerCount is function', typeof process.listenerCount, 'function');
+test('listeners is function', typeof process.listeners, 'function');
+test('rawListeners is function', typeof process.rawListeners, 'function');
+test('eventNames is function', typeof process.eventNames, 'function');
+test('prependListener is function', typeof process.prependListener, 'function');
+test('prependOnceListener is function', typeof process.prependOnceListener, 'function');
+test('setMaxListeners is function', typeof process.setMaxListeners, 'function');
+test('getMaxListeners is function', typeof process.getMaxListeners, 'function');
+
+let onCalled = false;
+process.on('testOn', () => {
+  onCalled = true;
+});
+process.emit('testOn');
+test('on/emit works', onCalled, true);
+process.removeAllListeners('testOn');
+
+let onceCount = 0;
+process.once('testOnce', () => {
+  onceCount++;
+});
+process.emit('testOnce');
+process.emit('testOnce');
+test('once fires once', onceCount, 1);
+
+let offCount = 0;
+const offHandler = () => {
+  offCount++;
+};
+process.on('testOff', offHandler);
+process.emit('testOff');
+process.off('testOff', offHandler);
+process.emit('testOff');
+test('off removes listener', offCount, 1);
+
+let addListenerCalled = false;
+process.addListener('testAddListener', () => {
+  addListenerCalled = true;
+});
+process.emit('testAddListener');
+test('addListener works', addListenerCalled, true);
+process.removeAllListeners('testAddListener');
+
+let removeListenerCount = 0;
+const rlHandler = () => {
+  removeListenerCount++;
+};
+process.on('testRL', rlHandler);
+process.emit('testRL');
+process.removeListener('testRL', rlHandler);
+process.emit('testRL');
+test('removeListener works', removeListenerCount, 1);
+
+process.on('testCount', () => {});
+process.on('testCount', () => {});
+test('listenerCount returns count', process.listenerCount('testCount'), 2);
+process.removeAllListeners('testCount');
+test('removeAllListeners clears', process.listenerCount('testCount'), 0);
+
+const listenersSeen = [];
+const listenersFirst = () => {
+  listenersSeen.push('first');
+};
+const listenersSecond = () => {
+  listenersSeen.push('second');
+};
+process.on('testListeners', listenersFirst);
+process.prependListener('testListeners', listenersSecond);
+const processListeners = process.listeners('testListeners');
+test('listeners returns array', Array.isArray(processListeners), true);
+test('listeners includes prepended handler first', processListeners[0], listenersSecond);
+test('listeners includes appended handler second', processListeners[1], listenersFirst);
+const processRawListeners = process.rawListeners('testListeners');
+test('rawListeners returns array', Array.isArray(processRawListeners), true);
+test('rawListeners includes prepended handler first', processRawListeners[0], listenersSecond);
+test('rawListeners includes appended handler second', processRawListeners[1], listenersFirst);
+test('eventNames includes active process event', process.eventNames().includes('testListeners'), true);
+process.emit('testListeners');
+test('prependListener affects emit order', listenersSeen.join(','), 'second,first');
+process.removeAllListeners('testListeners');
+test('eventNames excludes removed process event', process.eventNames().includes('testListeners'), false);
+
+let prependOnceCount = 0;
+const prependOnceMarker = [];
+process.on('testPrependOnce', () => {
+  prependOnceMarker.push('on');
+});
+process.prependOnceListener('testPrependOnce', () => {
+  prependOnceCount++;
+  prependOnceMarker.push('once');
+});
+process.emit('testPrependOnce');
+process.emit('testPrependOnce');
+test('prependOnceListener fires once', prependOnceCount, 1);
+test('prependOnceListener runs before on listener', prependOnceMarker[0], 'once');
+process.removeAllListeners('testPrependOnce');
+
+let receivedArg = null;
+process.on('testArgs', arg => {
+  receivedArg = arg;
+});
+process.emit('testArgs', 'hello');
+test('emit passes arguments', receivedArg, 'hello');
+process.removeAllListeners('testArgs');
+
+const chainResult = process.on('testChain', () => {});
+test('on returns process', chainResult, process);
+process.removeAllListeners('testChain');
+
+test('getMaxListeners default', process.getMaxListeners(), 10);
+
+process.setMaxListeners(20);
+test('setMaxListeners updates', process.getMaxListeners(), 20);
+process.setMaxListeners(10);
+
+process.setMaxListeners(0);
+for (let i = 0; i < 15; i++) {
+  process.on('manyListeners', () => {});
+}
+test('supports many listeners', process.listenerCount('manyListeners'), 15);
+process.removeAllListeners('manyListeners');
+process.setMaxListeners(10);
+
+test('stdin is object', typeof process.stdin, 'object');
+test('stdin.isTTY is boolean', typeof process.stdin.isTTY, 'boolean');
+test('stdin.setRawMode is function', typeof process.stdin.setRawMode, 'function');
+test('stdin.resume is function', typeof process.stdin.resume, 'function');
+test('stdin.pause is function', typeof process.stdin.pause, 'function');
+test('stdin.on is function', typeof process.stdin.on, 'function');
+test('stdin.removeAllListeners is function', typeof process.stdin.removeAllListeners, 'function');
+
+test('stdout is object', typeof process.stdout, 'object');
+test('stdout.isTTY is boolean', typeof process.stdout.isTTY, 'boolean');
+test('stdout.rows shape', process.stdout.isTTY ? typeof process.stdout.rows === 'number' : process.stdout.rows === undefined, true);
+test('stdout.columns shape', process.stdout.isTTY ? typeof process.stdout.columns === 'number' : process.stdout.columns === undefined, true);
+test('stdout.write is function', typeof process.stdout.write, 'function');
+test('stdout.on is function', typeof process.stdout.on, 'function');
+test('stdout.once is function', typeof process.stdout.once, 'function');
+test('stdout.removeAllListeners is function', typeof process.stdout.removeAllListeners, 'function');
+test('stdout.getWindowSize is function', typeof process.stdout.getWindowSize, 'function');
+
+const windowSize = process.stdout.getWindowSize();
+test('getWindowSize returns array', Array.isArray(windowSize), true);
+test('getWindowSize has 2 elements', windowSize.length, 2);
+test('getWindowSize cols is number', typeof windowSize[0], 'number');
+test('getWindowSize rows is number', typeof windowSize[1], 'number');
+
+test('stderr is object', typeof process.stderr, 'object');
+test('stderr.isTTY is boolean', typeof process.stderr.isTTY, 'boolean');
+test('stderr.write is function', typeof process.stderr.write, 'function');
+test('stderr.on is function', typeof process.stderr.on, 'function');
+test('stderr.once is function', typeof process.stderr.once, 'function');
+test('stderr.removeAllListeners is function', typeof process.stderr.removeAllListeners, 'function');
+
+test('version is string', typeof process.version, 'string');
+test('version starts with v', process.version.startsWith('v'), true);
+
+test('versions is object', typeof process.versions, 'object');
+test('versions inherits Object.prototype methods', typeof process.versions.hasOwnProperty, 'function');
+test('versions.hasOwnProperty finds node', process.versions.hasOwnProperty('node'), true);
+test('versions.ant exists', typeof process.versions.ant, 'string');
+test('versions.skim exists', typeof process.versions.skim, 'string');
+test('versions.uv exists', typeof process.versions.uv, 'string');
+
+test('features is object', typeof process.features, 'object');
+test('features inherits Object.prototype methods', typeof process.features.hasOwnProperty, 'function');
+test('features.hasOwnProperty finds uv', process.features.hasOwnProperty('uv'), true);
+test('features.uv is boolean', typeof process.features.uv, 'boolean');
+test('features.typescript exists', typeof process.features.typescript, 'string');
+
+test('release is object', typeof process.release, 'object');
+test('release inherits Object.prototype methods', typeof process.release.hasOwnProperty, 'function');
+test('release.hasOwnProperty finds name', process.release.hasOwnProperty('name'), true);
+test('release.name is string', typeof process.release.name, 'string');
+
+test('uptime is function', typeof process.uptime, 'function');
+const uptime = process.uptime();
+test('uptime returns number', typeof uptime, 'number');
+test('uptime is non-negative', uptime >= 0, true);
+
+test('memoryUsage is function', typeof process.memoryUsage, 'function');
+const mem = process.memoryUsage();
+test('memoryUsage returns object', typeof mem, 'object');
+test('memoryUsage.rss is number', typeof mem.rss, 'number');
+test('memoryUsage.heapTotal is number', typeof mem.heapTotal, 'number');
+test('memoryUsage.heapUsed is number', typeof mem.heapUsed, 'number');
+test('memoryUsage.rss method exists', typeof process.memoryUsage.rss, 'function');
+test('memoryUsage.rss returns number', typeof process.memoryUsage.rss(), 'number');
+
+test('cpuUsage is function', typeof process.cpuUsage, 'function');
+const cpu = process.cpuUsage();
+test('cpuUsage returns object', typeof cpu, 'object');
+test('cpuUsage.user is number', typeof cpu.user, 'number');
+test('cpuUsage.system is number', typeof cpu.system, 'number');
+
+test('hrtime is function', typeof process.hrtime, 'function');
+const hr = process.hrtime();
+test('hrtime returns array', Array.isArray(hr), true);
+test('hrtime has 2 elements', hr.length, 2);
+test('hrtime[0] is number', typeof hr[0], 'number');
+test('hrtime[1] is number', typeof hr[1], 'number');
+
+test('hrtime.bigint is function', typeof process.hrtime.bigint, 'function');
+const hrBigint = process.hrtime.bigint();
+test('hrtime.bigint returns bigint', typeof hrBigint, 'bigint');
+
+test('kill is function', typeof process.kill, 'function');
+test('abort is function', typeof process.abort, 'function');
+test('chdir is function', typeof process.chdir, 'function');
+test('umask is function', typeof process.umask, 'function');
+
+const oldMask = process.umask();
+test('umask returns number', typeof oldMask, 'number');
+
+if (process.platform !== 'win32') {
+  test('getuid is function', typeof process.getuid, 'function');
+  test('geteuid is function', typeof process.geteuid, 'function');
+  test('getgid is function', typeof process.getgid, 'function');
+  test('getegid is function', typeof process.getegid, 'function');
+  test('getgroups is function', typeof process.getgroups, 'function');
+  test('setuid is function', typeof process.setuid, 'function');
+  test('setgid is function', typeof process.setgid, 'function');
+  test('seteuid is function', typeof process.seteuid, 'function');
+  test('setegid is function', typeof process.setegid, 'function');
+  test('setgroups is function', typeof process.setgroups, 'function');
+  test('initgroups is function', typeof process.initgroups, 'function');
+
+  test('getuid returns number', typeof process.getuid(), 'number');
+  test('getgid returns number', typeof process.getgid(), 'number');
+  test('getgroups returns array', Array.isArray(process.getgroups()), true);
+}
+
+summary();

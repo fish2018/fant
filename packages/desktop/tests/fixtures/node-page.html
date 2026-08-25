@@ -1,0 +1,23 @@
+<!doctype html>
+<meta charset="utf-8" />
+<title>Ant node integration test</title>
+<script type="module">
+  import { readFileSync } from 'node:fs';
+  import { randomUUID as makeUUID } from 'node:crypto';
+  import path from 'node:path';
+  import * as shell from 'ant:shell';
+
+  try {
+    const value = readFileSync(path.resolve('tests/fixtures/node-value.txt'), 'utf8').trim();
+    Ant.ipc.send('node:done', {
+      directImport: value === 'node-integration-ok',
+      genericBuiltin: /^[0-9a-f-]{36}$/.test(makeUUID()),
+      antBuiltin: typeof shell.$ === 'function',
+      preloadPrivileged: privilegedPreload.homeExists && privilegedPreload.separator === '/',
+      sharedContext: sharedFromPreload === 'shared-world',
+      globals: typeof require === 'function' && process.platform === 'darwin'
+    });
+  } catch (error) {
+    Ant.ipc.send('node:error', { message: error.message, stack: error.stack });
+  }
+</script>

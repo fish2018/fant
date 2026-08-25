@@ -1,0 +1,47 @@
+diff --git a/src/url.c b/src/url.c
+index 74a5882..f038cd8 100644
+--- a/src/url.c
++++ b/src/url.c
+@@ -5,6 +5,11 @@
+ 
+ #include <tlsuv/http.h>
+ 
++static const char *authority_end(const char *p) {
++    const char *end = strpbrk(p, "/?#");
++    return end != NULL ? end : p + strlen(p);
++}
++
+ int tlsuv_parse_url(struct tlsuv_url_s *url, const char *urlstr) {
+     memset(url, 0, sizeof(struct tlsuv_url_s));
+ 
+@@ -66,19 +71,19 @@ int tlsuv_parse_url(struct tlsuv_url_s *url, const char *urlstr) {
+         p += (count + 3);
+     }
+ 
+-    if (strchr(p, '@') != NULL) {
++    const char *auth_end = authority_end(p);
++    const char *userinfo_end = memchr(p, '@', (size_t)(auth_end - p));
++    if (userinfo_end != NULL) {
+         url->username = p;
+-        sscanf(p, "%*[^:@]%n", &count);
+-        url->username_len = count;
+-        p += count;
+-        if (*p == ':') {
+-            p++;
+-            url->password = p;
+-            sscanf(p, "%*[^@]%n", &count);
+-            url->password_len = count;
+-            p += count;
++        const char *password_start = memchr(p, ':', (size_t)(userinfo_end - p));
++        if (password_start != NULL) {
++            url->username_len = (size_t)(password_start - p);
++            url->password = password_start + 1;
++            url->password_len = (size_t)(userinfo_end - url->password);
++        } else {
++            url->username_len = (size_t)(userinfo_end - p);
+         }
+-        p++;
++        p = userinfo_end + 1;
+     }
+ 
+     count = 0;

@@ -1,0 +1,8 @@
+[wrap-git]
+url = https://github.com/theMackabu/wirecall.git
+revision = 26931f0b5085e0c1c76101d8c6d4563273f69c2d
+depth = 1
+diff_files = patches/wirecall-android-poll.patch
+
+[provide]
+wirecall = wirecall_dep

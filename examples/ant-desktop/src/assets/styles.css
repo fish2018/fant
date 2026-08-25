@@ -1,0 +1,88 @@
+* {
+  box-sizing: border-box;
+}
+
+:root {
+  color-scheme: dark;
+  --accent: #8ab4f8;
+  --background: #202124;
+  --surface: #303134;
+  --text: #f1f1f1;
+  --muted: #bdc1c6;
+  --border: #5f6368;
+}
+
+html,
+body {
+  width: 100%;
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  color: var(--text);
+  background: var(--background);
+  font:
+    14px/1.5 system-ui,
+    sans-serif;
+}
+
+.titlebar {
+  height: 44px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--muted);
+  font-size: 12px;
+  user-select: none;
+  -webkit-app-region: drag;
+}
+
+main {
+  width: min(640px, calc(100% - 48px));
+  margin: 48px auto;
+}
+
+h1 {
+  margin: 0 0 12px;
+  font-size: 28px;
+}
+
+p {
+  color: var(--muted);
+}
+
+code {
+  color: var(--text);
+}
+
+.status {
+  display: flex;
+  gap: 9px;
+  align-items: center;
+  margin-top: 32px;
+  padding-top: 20px;
+  border-top: 1px solid var(--border);
+}
+
+.dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--accent);
+}
+
+button {
+  margin-top: 8px;
+  padding: 8px 12px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  color: var(--text);
+  background: var(--surface);
+  cursor: pointer;
+  -webkit-app-region: no-drag;
+}
+
+button:hover {
+  filter: brightness(1.1);
+}

@@ -1,0 +1,26 @@
+diff --git a/src/tlsuv.c b/src/tlsuv.c
+index 797ce92..1429c30 100644
+--- a/src/tlsuv.c
++++ b/src/tlsuv.c
+@@ -572,15 +572,19 @@ static void on_connect(uv_os_sock_t sock, int status, void *ctx) {
+     uv_connect_t *r = ctx;
+     tlsuv_stream_t *clt = (tlsuv_stream_t *)r->handle;
+     clt->connect_req = NULL;
++    /* The connector callback owns the request passed as its context.  Do not
++     * reload it through clt->conn_req: closing/cancellation may already have
++     * cleared or changed that field while the connector callback was queued. */
++    clt->conn_req = r;
+ 
+     TLS_LOG(VERB, "connect status: %d", status);
+     if (status == 0) {
+-        tlsuv_stream_open(clt->conn_req, clt, sock, clt->conn_req->cb);
++        tlsuv_stream_open(r, clt, sock, r->cb);
+         return;
+     }
+ 
+     clt->conn_req = NULL;
+-    r->cb(r, status);
++    if (r->cb) r->cb(r, status);
+ 
+     // app closed stream before it connected
+     if (clt->close_cb) {

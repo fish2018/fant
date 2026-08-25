@@ -1,0 +1,42 @@
+{
+  "name": "ant",
+  "binary": "ant",
+  "installEnv": "ANT_INSTALL",
+  "defaultInstallDir": ".ant",
+  "downloadUrl": "https://manifest.antjs.org/v1/download/ant/{target}",
+  "targets": [
+    {
+      "name": "darwin-x64",
+      "all": ["Darwin", "x86_64"],
+      "rosettaTarget": "darwin-aarch64"
+    },
+    {
+      "name": "darwin-aarch64",
+      "all": ["Darwin", "arm64"]
+    },
+    {
+      "name": "linux-aarch64",
+      "any": [
+        ["Linux", "aarch64"],
+        ["Linux", "arm64"]
+      ]
+    },
+    {
+      "name": "windows-x64",
+      "all": ["MINGW64"]
+    },
+    {
+      "name": "linux-riscv64",
+      "all": ["Linux", "riscv64"],
+      "unsupported": "Not supported on riscv64"
+    },
+    {
+      "name": "linux-x64",
+      "default": true
+    }
+  ],
+  "linuxMuslFile": "/etc/alpine-release",
+  "linuxMuslSuffix": "-musl",
+  "publishedCopies": ["docs/private/landing/public/install"],
+  "deployDirs": ["docs/private/landing"]
+}

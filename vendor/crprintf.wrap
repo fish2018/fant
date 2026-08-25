@@ -1,0 +1,4 @@
+[wrap-git]
+url = https://github.com/themackabu/crprintf.git
+revision = d396ba00998fc4c99283e9fd30b27ed2ccf58291
+depth = 1

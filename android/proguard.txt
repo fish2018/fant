@@ -1,0 +1,3 @@
+# JNI entry points use the Java class and method names in their native symbols.
+-keep class org.antjs.runtime.AntRuntime { *; }
+-keep class org.antjs.runtime.AntRuntime$AntRuntimeException { *; }

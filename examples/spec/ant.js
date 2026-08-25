@@ -1,0 +1,61 @@
+import { test, summary } from './helpers.js';
+
+console.log('Ant Global Tests\n');
+
+test('Ant exists', typeof Ant, 'object');
+test('version is string', typeof Ant.version, 'string');
+test('version format', /^\d+\.\d+\.\w+\.\d+/.test(Ant.version), true);
+test('target is string', typeof Ant.target, 'string');
+test('target not empty', Ant.target.length > 0, true);
+test('revision is string', typeof Ant.revision, 'string');
+test('buildDate is string', typeof Ant.buildDate, 'string');
+test('host is string', typeof Ant.host, 'string');
+
+const validHosts = [
+  'android',
+  'cygwin',
+  'darwin',
+  'dragonfly',
+  'emscripten',
+  'freebsd',
+  'gnu',
+  'haiku',
+  'linux',
+  'netbsd',
+  'openbsd',
+  'windows',
+  'sunos',
+  'os/2'
+];
+
+test('host is valid', validHosts.includes(Ant.host), true);
+
+test('typeof is function', typeof Ant.typeof, 'function');
+test('typeof number', Ant.typeof(42), 'number');
+test('typeof string', Ant.typeof('hello'), 'string');
+test('typeof object', Ant.typeof({}), 'object');
+test('typeof array', Ant.typeof([]), 'array');
+
+test(
+  'typeof function',
+  Ant.typeof(() => {}),
+  'function'
+);
+
+test('typeof null', Ant.typeof(null), 'null');
+test('typeof undefined', Ant.typeof(undefined), 'undefined');
+test('typeof boolean', Ant.typeof(true), 'boolean');
+
+test('stats is function', typeof Ant.stats, 'function');
+test('c is not top-level', typeof Ant.c, 'undefined');
+test('unsafe is object', typeof Ant.unsafe, 'object');
+test('unsafe.c is function', typeof Ant.unsafe.c, 'function');
+test('raw is object', typeof Ant.raw, 'object');
+test('raw.typeof is function', typeof Ant.raw.typeof, 'function');
+test('sleep is function', typeof Ant.sleep, 'function');
+test('msleep is function', typeof Ant.msleep, 'function');
+test('usleep is function', typeof Ant.usleep, 'function');
+test('signal is function', typeof Ant.signal, 'function');
+test('serve is function', typeof Ant.serve, 'function');
+
+summary();

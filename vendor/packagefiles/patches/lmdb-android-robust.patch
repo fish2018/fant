@@ -1,0 +1,7 @@
+diff --git a/libraries/liblmdb/meson.build b/libraries/liblmdb/meson.build
+--- a/libraries/liblmdb/meson.build
++++ b/libraries/liblmdb/meson.build
+@@ -11,0 +12 @@
++lmdb_c_args = host_machine.system() == 'android' ? ['-DMDB_USE_ROBUST=0'] : []
+@@ -15,0 +17 @@
++  c_args: lmdb_c_args,

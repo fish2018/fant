@@ -1,0 +1,407 @@
+#include "utils.h"
+#include "base64.h"
+#include "escape.h"
+#include "esm/remote.h"
+#include "storage.h"
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <stdint.h>
+#include <uv.h>
+#include <tlsuv/tlsuv.h>
+#include <tlsuv/http.h>
+
+#ifdef _WIN32
+#include <direct.h>
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>
+#define mkdir_p(path) _mkdir(path)
+#define PATH_SEP '\\'
+#else
+#include <sys/stat.h>
+#include <sys/types.h>
+#define mkdir_p(path) mkdir(path, 0755)
+#define PATH_SEP '/'
+#endif
+
+typedef struct {
+  char *data;
+  size_t size;
+  size_t capacity;
+  int status_code;
+  int completed;
+  int failed;
+  char *error_msg;
+  tlsuv_http_t http_client;
+  tlsuv_http_req_t *http_req;
+} esm_url_fetch_t;
+
+bool esm_is_url(const char *spec) {
+  return (strncmp(spec, "http://", 7) == 0 || strncmp(spec, "https://", 8) == 0);
+}
+
+bool esm_is_data_url(const char *spec) {
+  return strncmp(spec, "data:", 5) == 0;
+}
+
+static char *esm_percent_decode(const char *src, size_t src_len, size_t *out_len) {
+  char *out = malloc(src_len + 1);
+  if (!out) return NULL;
+
+  size_t j = 0;
+  for (size_t i = 0; i < src_len; i++) {
+    if (src[i] == '%' && i + 2 < src_len &&
+        is_xdigit(src[i + 1]) && is_xdigit(src[i + 2])) {
+      out[j++] = (char)((unhex(src[i + 1]) << 4) | unhex(src[i + 2]));
+      i += 2;
+    } else out[j++] = src[i];
+  }
+
+  out[j] = '\0';
+  if (out_len) *out_len = j;
+  return out;
+}
+
+char *esm_parse_data_url(const char *url, size_t *out_len) {
+  if (!esm_is_data_url(url)) return NULL;
+
+  const char *comma = strchr(url + 5, ',');
+  if (!comma) return NULL;
+
+  const char *header = url + 5;
+  size_t header_len = (size_t)(comma - header);
+  
+  const char *body = comma + 1;
+  size_t body_len = strlen(body);
+
+  bool is_base64 = (header_len >= 7 && strncmp(comma - 7, ";base64", 7) == 0);
+  if (is_base64) {
+    uint8_t *decoded = ant_base64_decode(body, body_len, out_len);
+    if (!decoded) return NULL;
+    
+    char *result = malloc(*out_len + 1);
+    if (!result) { free(decoded); return NULL; }
+    
+    memcpy(result, decoded, *out_len);
+    result[*out_len] = '\0';
+    free(decoded);
+    
+    return result;
+  }
+
+  return esm_percent_decode(body, body_len, out_len);
+}
+
+static int is_path_sep(char c) {
+  return c == '/' || c == '\\';
+}
+
+static void esm_url_fetch_close_cb(tlsuv_http_t *client) {
+  esm_url_fetch_t *ctx = (esm_url_fetch_t *)client->data;
+  ctx->completed = 1;
+}
+
+static void esm_url_fetch_body_cb(tlsuv_http_req_t *http_req, char *body, ssize_t len) {
+  esm_url_fetch_t *ctx = (esm_url_fetch_t *)http_req->data;
+
+  if (len == UV_EOF) {
+    tlsuv_http_close(&ctx->http_client, esm_url_fetch_close_cb);
+    return;
+  }
+
+  if (len < 0) {
+    ctx->failed = 1;
+    ctx->error_msg = strdup(uv_strerror((int)len));
+    tlsuv_http_close(&ctx->http_client, esm_url_fetch_close_cb);
+    return;
+  }
+
+  if (ctx->size + (size_t)len > ctx->capacity) {
+    size_t new_cap = ctx->capacity * 2;
+    while (new_cap < ctx->size + (size_t)len) new_cap *= 2;
+    char *new_data = realloc(ctx->data, new_cap);
+    if (!new_data) {
+      ctx->failed = 1;
+      ctx->error_msg = strdup("Out of memory");
+      tlsuv_http_close(&ctx->http_client, esm_url_fetch_close_cb);
+      return;
+    }
+    ctx->data = new_data;
+    ctx->capacity = new_cap;
+  }
+
+  memcpy(ctx->data + ctx->size, body, (size_t)len);
+  ctx->size += (size_t)len;
+}
+
+static void esm_url_fetch_resp_cb(tlsuv_http_resp_t *resp, void *data) {
+  (void)data;
+  esm_url_fetch_t *ctx = (esm_url_fetch_t *)resp->req->data;
+
+  if (resp->code < 0) {
+    ctx->failed = 1;
+    char err_buf[256];
+    snprintf(err_buf, sizeof(err_buf), "%s (code: %d)", uv_strerror(resp->code), resp->code);
+    ctx->error_msg = strdup(err_buf);
+    tlsuv_http_close(&ctx->http_client, esm_url_fetch_close_cb);
+    return;
+  }
+
+  ctx->status_code = resp->code;
+  resp->body_cb = esm_url_fetch_body_cb;
+}
+
+static char *esm_get_cache_path(const char *url) {
+  uint64_t hash = hash_key(url, strlen(url));
+  
+  char suffix[64];
+  snprintf(suffix, sizeof(suffix), "remote/%016llx", (unsigned long long)hash);
+
+  size_t len = 4096;
+  char *cache_path = malloc(len);
+  if (!cache_path) return NULL;
+
+  if (ant_xdg_cache_path(cache_path, len, suffix) != 0) {
+    free(cache_path);
+    return NULL;
+  }
+  
+  return cache_path;
+}
+
+static char *esm_read_cache(const char *cache_path, size_t *out_len) {
+  FILE *fp = fopen(cache_path, "rb");
+  if (!fp) return NULL;
+
+  fseek(fp, 0, SEEK_END);
+  long size = ftell(fp);
+  fseek(fp, 0, SEEK_SET);
+
+  char *content = malloc(size + 1);
+  if (!content) {
+    fclose(fp);
+    return NULL;
+  }
+
+  fread(content, 1, size, fp);
+  fclose(fp);
+  content[size] = '\0';
+
+  if (out_len) *out_len = (size_t)size;
+  return content;
+}
+
+static void esm_mkdir_recursive(char *path) {
+  for (char *p = path + 1; *p; p++) {
+#ifdef _WIN32
+    if (p == path + 2 && path[1] == ':') continue;
+#endif
+    if (is_path_sep(*p)) {
+      *p = '\0';
+      mkdir_p(path);
+      *p = PATH_SEP;
+    }
+  }
+  mkdir_p(path);
+}
+
+static void esm_write_cache(const char *cache_path, const char *url, const char *content, size_t len) {
+  char *dir = strdup(cache_path);
+  if (!dir) return;
+
+  for (char *p = dir + strlen(dir) - 1; p > dir; p--) {
+    if (is_path_sep(*p)) { *p = '\0'; break; }
+  }
+
+  esm_mkdir_recursive(dir);
+
+  FILE *fp = fopen(cache_path, "wb");
+  if (!fp) { free(dir); return; }
+  fwrite(content, 1, len, fp);
+  fclose(fp);
+
+  size_t meta_len = strlen(dir) + 16;
+  char *meta_path = malloc(meta_len);
+  if (meta_path) {
+    snprintf(meta_path, meta_len, "%s/metadata.bin", dir);
+    FILE *mfp = fopen(meta_path, "ab");
+    if (mfp) {
+      uint64_t hash = hash_key(url, strlen(url));
+      uint16_t url_len = (uint16_t)strlen(url);
+      fwrite(&url_len, sizeof(url_len), 1, mfp);
+      fwrite(url, 1, url_len, mfp);
+      fwrite(&hash, sizeof(hash), 1, mfp);
+      fclose(mfp);
+    }
+    free(meta_path);
+  }
+
+  free(dir);
+}
+
+char *esm_fetch_url(const char *url, size_t *out_len, char **out_error) {
+  char *cache_path = esm_get_cache_path(url);
+  if (cache_path) {
+    char *cached = esm_read_cache(cache_path, out_len);
+    if (cached) { free(cache_path); return cached; }
+  }
+
+  uv_loop_t *loop = uv_default_loop();
+  esm_url_fetch_t ctx = {0};
+  
+  ctx.capacity = 16384;
+  ctx.data = malloc(ctx.capacity);
+  if (!ctx.data) {
+    if (out_error) *out_error = strdup("Out of memory");
+    return NULL;
+  }
+
+  const char *scheme_end = strstr(url, "://");
+  if (!scheme_end) {
+    free(ctx.data);
+    if (out_error) *out_error = strdup("Invalid URL: no scheme");
+    return NULL;
+  }
+
+  const char *host_start = scheme_end + 3;
+  const char *path_start = strchr(host_start, '/');
+  const char *at_in_host = NULL;
+
+  for (const char *p = host_start; p < (path_start ? path_start : host_start + strlen(host_start)); p++) {
+    if (*p == '@') at_in_host = p;
+  }
+  if (at_in_host) host_start = at_in_host + 1;
+
+  size_t scheme_len = scheme_end - url;
+  size_t host_len = path_start ? (size_t)(path_start - host_start) : strlen(host_start);
+  const char *path = path_start ? path_start : "/";
+
+  char *host_url = calloc(1, scheme_len + 3 + host_len + 1);
+  snprintf(host_url, scheme_len + 3 + host_len + 1, "%.*s://%.*s", (int)scheme_len, url, (int)host_len, host_start);
+  int rc = tlsuv_http_init(loop, &ctx.http_client, host_url);
+  free(host_url);
+
+  if (rc != 0) {
+    free(ctx.data);
+    if (out_error) *out_error = strdup("Failed to initialize HTTP client");
+    return NULL;
+  }
+
+  ctx.http_client.data = &ctx;
+  ctx.http_req = tlsuv_http_req(&ctx.http_client, "GET", path, esm_url_fetch_resp_cb, &ctx);
+
+  if (!ctx.http_req) {
+    free(ctx.data);
+    tlsuv_http_close(&ctx.http_client, NULL);
+    if (out_error) *out_error = strdup("Failed to create HTTP request");
+    return NULL;
+  }
+
+  ctx.http_req->data = &ctx;
+  while (!ctx.completed) uv_run(loop, UV_RUN_ONCE);
+
+  if (ctx.failed || ctx.status_code < 200 || ctx.status_code >= 400) {
+    if (out_error) {
+      if (ctx.error_msg) {
+        *out_error = ctx.error_msg;
+        ctx.error_msg = NULL;
+      } else {
+        char err_buf[64];
+        snprintf(err_buf, sizeof(err_buf), "HTTP error: %d", ctx.status_code);
+        *out_error = strdup(err_buf);
+      }
+    }
+    free(ctx.data);
+    if (ctx.error_msg) free(ctx.error_msg);
+    if (cache_path) free(cache_path);
+    return NULL;
+  }
+
+  ctx.data[ctx.size] = '\0';
+  if (out_len) *out_len = ctx.size;
+  if (ctx.error_msg) free(ctx.error_msg);
+
+  if (cache_path) {
+    esm_write_cache(cache_path, url, ctx.data, ctx.size);
+    free(cache_path);
+  }
+
+  return ctx.data;
+}
+
+char *esm_resolve_url(const char *specifier, const char *base_url) {
+  if (esm_is_url(specifier)) {
+    return strdup(specifier);
+  }
+
+  if (specifier[0] == '/') {
+    const char *scheme_end = strstr(base_url, "://");
+    if (!scheme_end) return NULL;
+
+    const char *host_start = scheme_end + 3;
+    const char *path_start = strchr(host_start, '/');
+
+    const char *at_in_host = NULL;
+    for (const char *p = host_start; p < (path_start ? path_start : host_start + strlen(host_start)); p++) {
+      if (*p == '@') at_in_host = p;
+    }
+    if (at_in_host) host_start = at_in_host + 1;
+
+    size_t scheme_len = scheme_end - base_url;
+    size_t host_len = path_start ? (size_t)(path_start - host_start) : strlen(host_start);
+
+    size_t len = scheme_len + 3 + host_len + strlen(specifier) + 1;
+    char *result = malloc(len);
+    if (!result) return NULL;
+
+    snprintf(
+      result, len, "%.*s://%.*s%s",
+      (int)scheme_len, base_url,
+      (int)host_len, host_start,
+      specifier
+   );
+   
+    return result;
+  }
+
+  if (specifier[0] == '.' && (specifier[1] == '/' || (specifier[1] == '.' && specifier[2] == '/'))) {
+    char *base_copy = strdup(base_url);
+    if (!base_copy) return NULL;
+
+    char *last_slash = strrchr(base_copy, '/');
+    char *scheme_end = strstr(base_copy, "://");
+    if (scheme_end && last_slash > scheme_end + 2) {
+      *last_slash = '\0';
+    }
+
+    const char *spec = specifier;
+    while (strncmp(spec, "../", 3) == 0) {
+      spec += 3;
+      char *prev_slash = strrchr(base_copy, '/');
+      if (prev_slash && prev_slash > scheme_end + 2) {
+        *prev_slash = '\0';
+      }
+    }
+    
+    if (strncmp(spec, "./", 2) == 0) spec += 2;
+    size_t len = strlen(base_copy) + strlen(spec) + 2;
+    char *result = malloc(len);
+    if (!result) { free(base_copy); return NULL; }
+
+    snprintf(result, len, "%s/%s", base_copy, spec);
+    free(base_copy);
+    
+    return result;
+  }
+
+  return strdup(specifier);
+}
+
+char *esm_resolve(ant_t *js, const char *specifier, const char *base_path, char FILE_RESOLVER) {
+  if (esm_is_data_url(specifier)) return strdup(specifier);
+  if (ant_storage_path_is_virtual(specifier) || ant_storage_path_is_virtual(base_path))
+    return file_resolver(js, specifier, base_path);
+  if (esm_is_url(specifier) || esm_is_url(base_path)) return esm_resolve_url(specifier, base_path);
+  return file_resolver(js, specifier, base_path);
+}

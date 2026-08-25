@@ -1,0 +1,27 @@
+{
+  "template": [
+    {
+      "label": "Ant Desktop",
+      "submenu": [
+        { "role": "about" },
+        { "type": "separator" },
+        { "role": "hide" },
+        { "role": "hideOthers" },
+        { "type": "separator" },
+        { "role": "quit", "accelerator": "CmdOrCtrl+Q" }
+      ]
+    },
+    {
+      "label": "Edit",
+      "submenu": [
+        { "role": "undo" },
+        { "role": "redo" },
+        { "type": "separator" },
+        { "role": "cut" },
+        { "role": "copy" },
+        { "role": "paste" },
+        { "role": "selectAll" }
+      ]
+    }
+  ]
+}

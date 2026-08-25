@@ -1,0 +1,51 @@
+{
+  "name": "ant-desktop",
+  "version": "0.3.0",
+  "description": "Build native desktop applications with Ant",
+  "keywords": [
+    "ant",
+    "desktop",
+    "macos",
+    "chromium",
+    "native",
+    "appkit",
+    "javascript"
+  ],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/fish2018/fant.git",
+    "directory": "packages/desktop"
+  },
+  "type": "module",
+  "main": "index.js",
+  "types": "desktop.d.ts",
+  "exports": {
+    ".": "./index.js"
+  },
+  "bin": {
+    "ant-desktop": "app/bin/ant-desktop.js"
+  },
+  "scripts": {
+    "build": "ant scripts/build.js",
+    "package": "ant scripts/package-platform.cjs",
+    "release": "node scripts/publish.js",
+    "version:set": "node scripts/set-version.js",
+    "example:start": "ant app/bin/ant-desktop.js dev --app-dir ../../examples/ant-desktop",
+    "example:package": "ant app/bin/ant-desktop.js package --app-dir ../../examples/ant-desktop --overwrite"
+  },
+  "files": [
+    "app/bin/",
+    "config.js",
+    "desktop.d.ts",
+    "index.js",
+    "platforms.json",
+    "README.md"
+  ],
+  "optionalDependencies": {
+    "ant-desktop-darwin-arm64": "0.3.0"
+  },
+  "publishConfig": {
+    "access": "public"
+  }
+}

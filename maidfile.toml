@@ -1,0 +1,62 @@
+[tasks.build]
+path = "build"
+script = "meson compile"
+
+[tasks.reconfigure]
+path = "build"
+script = "meson setup --reconfigure"
+
+[tasks.strip]
+path = "build"
+script = "strip ant"
+
+[tasks.download]
+script = [".github/download.sh", "open .github/artifacts"]
+
+[tasks.run]
+script = ["maid build -q", "./build/ant %{arg.1}"]
+
+[tasks.preflight]
+script = "ant .github/agents/check_all.js"
+
+[tasks.knowledge]
+script = "ant .github/agents/check_repo_knowledge.js"
+
+[tasks.structure]
+script = "ant .github/agents/check_repo_structure.js"
+
+[tasks.validate_changes]
+script = "ant .github/agents/route_validation.js"
+
+[tasks.setup]
+script = ['meson subprojects download', 'meson setup build --wipe']
+
+[tasks.no_jit]
+script = ['meson subprojects download', 'meson setup build --wipe -Djit=false']
+
+[tasks.asan]
+script = ['meson subprojects download', 'meson setup build --wipe -Db_sanitize=address -Doptimization=0 -Db_lto=false -Dstrip=false -Db_lundef=false']
+
+[tasks.debug]
+script = [
+  'meson subprojects download',
+  'meson setup build --wipe --buildtype=debug -Doptimization=0 -Db_lto=false -Dstrip=false -Db_lundef=false -Dunity=off'
+]
+
+[tasks.shell]
+exec = true
+script = "nix develop --command zsh"
+
+[tasks.install]
+script = ["maid build -q", '''
+#!/usr/bin/env bash
+if which ant >/dev/null 2>&1; then
+  dir=$(dirname "$(which ant)")
+  cp ./build/ant "$dir/ant"
+  ln -sf "$dir/ant" "$dir/antx"
+else
+  mkdir -p ~/.ant/bin
+  cp ./build/ant ~/.ant/bin/
+  ln -sf ~/.ant/bin/ant ~/.ant/bin/antx
+fi
+''']

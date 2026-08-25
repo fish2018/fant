@@ -1,0 +1,65 @@
+#ifndef ANT_READLINE_H
+#define ANT_READLINE_H
+
+#include <stdbool.h>
+#include <stddef.h>
+#include "highlight.h"
+
+typedef struct {
+  char **lines;
+  int count;
+  int capacity;
+  int current;
+} ant_history_t;
+
+typedef enum {
+  ANT_READLINE_LINE,
+  ANT_READLINE_EOF,
+  ANT_READLINE_INTERRUPT,
+} ant_readline_result_t;
+
+void ant_readline_install_signal_handler(void);
+void ant_readline_shutdown(void);
+bool ant_readline_interrupt_pending(void);
+void ant_readline_clear_interrupt(void);
+void ant_readline_drain_interrupt_wake(void);
+void ant_readline_shutdown_signal_bridge(void);
+
+void ant_history_init(ant_history_t *hist, int capacity);
+void ant_history_add(ant_history_t *hist, const char *line);
+void ant_history_load(ant_history_t *hist);
+void ant_history_save(const ant_history_t *hist);
+void ant_history_free(ant_history_t *hist);
+
+int ant_readline_interrupt_fd(void);
+
+const char *ant_history_prev(ant_history_t *hist);
+const char *ant_history_next(ant_history_t *hist);
+
+typedef bool (*ant_readline_preview_fn)(
+  void *ctx,
+  const char *line,
+  size_t len,
+  char *suffix_out,
+  size_t suffix_len,
+  char *preview_out,
+  size_t preview_len
+);
+
+ant_readline_result_t ant_readline(
+  ant_history_t *hist,
+  const char *prompt,
+  highlight_state line_state,
+  char **out_line
+);
+
+ant_readline_result_t ant_readline_with_preview(
+  ant_history_t *hist,
+  const char *prompt,
+  highlight_state line_state,
+  ant_readline_preview_fn preview_fn,
+  void *preview_ctx,
+  char **out_line
+);
+
+#endif

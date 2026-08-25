@@ -1,0 +1,52 @@
+import { Client, GatewayIntentBits, Routes, MessageFlags } from 'discord.js';
+
+import version from './commands/version.js';
+import github from './commands/github.js';
+import evalCmd from './commands/eval.js';
+import runCmd from './commands/run.js';
+import uptime from './commands/uptime.js';
+import ping from './commands/ping.js';
+import ai from './commands/ai.js';
+import sh from './commands/sh.js';
+
+const CLIENT_ID = process.env.DISCORD_CLIENT_ID;
+const GUILD_ID = process.env.DISCORD_GUILD_ID;
+const DISCORD_TOKEN = process.env.DISCORD_TOKEN;
+
+const missing = [
+  ['DISCORD_CLIENT_ID', CLIENT_ID],
+  ['DISCORD_GUILD_ID', GUILD_ID],
+  ['DISCORD_TOKEN', DISCORD_TOKEN]
+].filter(([, value]) => !value).map(([name]) => name);
+
+if (missing.length) {
+  console.error(`missing required environment variables: ${missing.join(', ')}`);
+  process.exit(1);
+}
+
+const handlers = Object.fromEntries([version, github, evalCmd, runCmd, uptime, ping, ai, sh].map(h => [h.builder.name, h]));
+const commands = Object.values(handlers).map(h => h.builder.toJSON());
+const client = new Client({ intents: [GatewayIntentBits.Guilds] });
+
+let ownerId = null;
+
+client.once('clientReady', async () => {
+  await client.rest.put(Routes.applicationGuildCommands(CLIENT_ID, GUILD_ID), { body: commands });
+  await client.rest.put(Routes.applicationCommands(CLIENT_ID), { body: commands });
+  const app = await client.application.fetch();
+  ownerId = app.owner?.ownerId ?? app.owner?.id ?? app.owner?.members?.first()?.id ?? null;
+  console.log(`logged in as ${client.user.tag}`);
+});
+
+client.on('interactionCreate', async interaction => {
+  if (!interaction.isChatInputCommand()) return;
+  const handler = handlers[interaction.commandName];
+  if (!handler) return;
+  if (handler.ownerOnly && interaction.user.id !== ownerId) {
+    await interaction.reply({ content: 'this command is restricted to the application owner.', flags: MessageFlags.Ephemeral });
+    return;
+  }
+  await handler.run(interaction);
+});
+
+client.login(DISCORD_TOKEN);

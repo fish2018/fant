@@ -1,0 +1,178 @@
+{
+  "engine": {
+    "patterns": [
+      "src/*.c",
+      "src/*.cc",
+      "src/gc/*.c",
+      "src/repl/*.c",
+      "src/readline/*.c",
+      "src/highlight/*.c",
+      "src/esm/*.c",
+      "src/cli/*.c",
+      "src/sandbox/*.c",
+      "src/inspector/*.c",
+      "src/modules/**/*.c",
+      "src/streams/*.c",
+      "src/silver/*.c",
+      "src/http/*.c",
+      "src/net/*.c"
+    ],
+    "exclude": [
+      "src/android_stubs.c",
+      "src/main.c",
+      "src/main_runtime.c",
+      "src/modules/sandbox_stub.c"
+    ]
+  },
+  "library": {
+    "files": [
+      "src/cli/version.c"
+    ],
+    "patterns": [
+      "src/*.c",
+      "src/*.cc",
+      "src/gc/*.c",
+      "src/repl/*.c",
+      "src/readline/*.c",
+      "src/highlight/*.c",
+      "src/esm/*.c",
+      "src/sandbox/*.c",
+      "src/inspector/*.c",
+      "src/modules/**/*.c",
+      "src/streams/*.c",
+      "src/silver/*.c",
+      "src/http/*.c",
+      "src/net/*.c"
+    ],
+    "exclude": [
+      "src/android_stubs.c",
+      "src/main.c",
+      "src/main_runtime.c",
+      "src/modules/sandbox_stub.c"
+    ]
+  },
+  "library_android": {
+    "files": [
+      "src/android_stubs.c"
+    ],
+    "patterns": [
+      "src/*.c",
+      "src/*.cc",
+      "src/gc/*.c",
+      "src/esm/*.c",
+      "src/highlight/*.c",
+      "src/modules/**/*.c",
+      "src/streams/*.c",
+      "src/silver/*.c",
+      "src/http/*.c",
+      "src/net/*.c"
+    ],
+    "exclude": [
+      "src/main.c",
+      "src/main_runtime.c",
+      "src/watch.c",
+      "src/crash.c",
+      "src/download.c",
+      "src/modules/sandbox.c",
+      "src/sandbox/*.c",
+      "src/repl/*.c",
+      "src/modules/child_process.c",
+      "src/modules/worker_threads.c",
+      "src/modules/shell.c",
+      "src/modules/process_plan.c",
+      "src/modules/process_stage.c",
+      "src/modules/readline.c",
+      "src/readline/*.c",
+      "src/inspector/*.c"
+    ]
+  },
+  "runtime": {
+    "files": [
+      "src/sandbox/policy.c",
+      "src/modules/sandbox_stub.c"
+    ],
+    "patterns": [
+      "src/*.c",
+      "src/*.cc",
+      "src/gc/*.c",
+      "src/readline/*.c",
+      "src/highlight/*.c",
+      "src/esm/*.c",
+      "src/inspector/*.c",
+      "src/modules/**/*.c",
+      "src/streams/*.c",
+      "src/silver/*.c",
+      "src/http/*.c",
+      "src/net/*.c"
+    ],
+    "exclude": [
+      "src/android_stubs.c",
+      "src/main.c",
+      "src/modules/sandbox.c",
+      "src/main_runtime.c"
+    ]
+  },
+  "sandbox_backend": {
+    "sections": {
+      "shared": {
+        "files": [
+          "src/sandbox/backends/shared/common.c",
+          "src/sandbox/backends/shared/nat.c",
+          "src/sandbox/backends/shared/net_packets.c",
+          "src/sandbox/backends/shared/pci.c",
+          "src/sandbox/backends/shared/virtio.c",
+          "src/sandbox/backends/shared/virtio_9p.c",
+          "src/sandbox/backends/shared/virtio_blk.c",
+          "src/sandbox/backends/shared/virtio_net.c",
+          "src/sandbox/backends/shared/virtio_rng.c",
+          "src/sandbox/backends/shared/virtio_vsock.c"
+        ]
+      },
+      "darwin": {
+        "files": [
+          "src/sandbox/backends/darwin/backend.c"
+        ]
+      },
+      "darwin_hvf": {
+        "files": [
+          "src/sandbox/backends/darwin/fdt.c",
+          "src/sandbox/backends/darwin/gic.c",
+          "src/sandbox/backends/darwin/mmio.c",
+          "src/sandbox/backends/darwin/uart.c"
+        ]
+      },
+      "linux": {
+        "files": [
+          "src/sandbox/backends/linux/kvm_aarch64.c",
+          "src/sandbox/backends/linux/kvm_common.c",
+          "src/sandbox/backends/linux/kvm_unavailable.c",
+          "src/sandbox/backends/linux/kvm_x86.c"
+        ]
+      },
+      "windows": {
+        "files": [
+          "src/sandbox/backends/windows/backend.c"
+        ]
+      }
+    }
+  },
+  "core": {
+    "patterns": [
+      "src/core/**/*.ts"
+    ],
+    "exclude": [
+      "src/core/index.ts"
+    ]
+  },
+  "builtins": {
+    "patterns": [
+      "src/builtins/**/*.cts",
+      "src/builtins/**/*.mts",
+      "src/builtins/**/*.ts",
+      "src/builtins/**/*.cjs",
+      "src/builtins/**/*.mjs",
+      "src/builtins/**/*.js"
+    ],
+    "exclude": []
+  }
+}

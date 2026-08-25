@@ -1,0 +1,9 @@
+diff --git a/meson.build b/meson.build
+--- a/meson.build
++++ b/meson.build
+@@ -282,6 +282,7 @@ cares_args_map = {
+ }
+ cares_args_map += {
+   'darwin': cares_args_map['linux'],
++  'android': cares_args_map['linux'],
+ }

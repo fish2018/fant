@@ -1,0 +1,15 @@
+<!doctype html>
+<meta charset="utf-8" />
+<title>Ant preload test</title>
+<script>
+  (async () => {
+    const reply = await preloadApi.invoke('before-page');
+    Ant.ipc.send('preload:done', {
+      exposedBeforePage: reply === 'before-page' && preloadApi.readyState !== 'complete',
+      isolated: typeof isolatedMarker === 'undefined' && typeof preloadOnlyGlobal === 'undefined',
+      sandboxed: preloadApi.sandboxed
+    });
+  })().catch(error => {
+    Ant.ipc.send('preload:error', { message: error.message, stack: error.stack });
+  });
+</script>

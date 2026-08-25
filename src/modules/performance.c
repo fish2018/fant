@@ -1,0 +1,51 @@
+#include <stdio.h>
+#include <stdlib.h>
+#include <time.h>
+#ifdef _WIN32
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>
+#else
+#include <sys/time.h>
+#endif
+
+#include "ant.h"
+#include "modules/symbol.h"
+#include "modules/performance.h"
+
+static double get_current_time_ms(void) {
+#ifdef _WIN32
+  LARGE_INTEGER freq, count;
+  QueryPerformanceFrequency(&freq);
+  QueryPerformanceCounter(&count);
+  return (double)count.QuadPart * 1000.0 / (double)freq.QuadPart;
+#else
+  struct timeval tv;
+  gettimeofday(&tv, NULL);
+  return (double)tv.tv_sec * 1000.0 + (double)tv.tv_usec / 1000.0;
+#endif
+}
+
+// performance.now()
+static ant_value_t js_performance_now(ant_t *js, ant_value_t *args, int nargs) {
+  double now = get_current_time_ms() - js->perf_time_origin_ms;
+  return js_mknum(now);
+}
+
+ant_value_t perf_hooks_library(ant_t *js) {
+  ant_value_t lib = js_mkobj(js);
+  js_set(js, lib, "performance", js_get(js, js_glob(js), "performance"));
+  js_set_sym(js, lib, get_toStringTag_sym(), ANT_STRING("perf_hooks"));
+  return lib;
+}
+
+void init_performance_module(ant_t *js) {
+  ant_value_t glob = js_glob(js);
+  ant_value_t perf_obj = js_mkobj(js);
+
+  js->perf_time_origin_ms = get_current_time_ms();
+  js_set(js, perf_obj, "now", js_mkfun(js_performance_now));
+  js_set(js, perf_obj, "timeOrigin", js_mknum(js->perf_time_origin_ms));
+  
+  js_set_sym(js, perf_obj, get_toStringTag_sym(), ANT_STRING("Performance"));
+  js_set(js, glob, "performance", perf_obj);
+}

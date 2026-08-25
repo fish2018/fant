@@ -1,0 +1,38 @@
+#ifndef ANT_GC_MODULES_H
+#define ANT_GC_MODULES_H
+
+#include "types.h"
+
+typedef void (*gc_mark_fn)(ant_t *js, ant_value_t v);
+
+void gc_mark_timers(ant_t *js, gc_mark_fn mark);
+void gc_mark_cron(ant_t *js, gc_mark_fn mark);
+void gc_mark_atomics(ant_t *js, gc_mark_fn mark);
+void gc_mark_fetch(ant_t *js, gc_mark_fn mark);
+void gc_mark_fs(ant_t *js, gc_mark_fn mark);
+void gc_mark_child_process(ant_t *js, gc_mark_fn mark);
+void gc_mark_readline(ant_t *js, gc_mark_fn mark);
+void gc_mark_process(ant_t *js, gc_mark_fn mark);
+void gc_mark_navigator(ant_t *js, gc_mark_fn mark);
+void gc_mark_net(ant_t *js, gc_mark_fn mark);
+void gc_mark_tls(ant_t *js, gc_mark_fn mark);
+void gc_mark_server(ant_t *js, gc_mark_fn mark);
+void gc_mark_websocket(ant_t *js, gc_mark_fn mark);
+void gc_mark_eventsource(ant_t *js, gc_mark_fn mark);
+void gc_mark_events(ant_t *js, gc_mark_fn mark);
+void gc_mark_eventemitter_object(ant_t *js, ant_value_t obj, gc_mark_fn mark);
+void gc_finalize_events_object(ant_t *js, ant_value_t obj);
+void gc_mark_lmdb(ant_t *js, gc_mark_fn mark);
+void gc_mark_symbols(ant_t *js, gc_mark_fn mark);
+void gc_mark_esm(ant_t *js, gc_mark_fn mark);
+void gc_mark_worker_threads(ant_t *js, gc_mark_fn mark);
+void gc_mark_abort(ant_t *js, gc_mark_fn mark);
+void gc_mark_zlib(ant_t *js, gc_mark_fn mark);
+void gc_mark_wasm(ant_t *js, gc_mark_fn mark);
+void gc_mark_napi(ant_t *js, gc_mark_fn mark);
+void gc_mark_rpc(ant_t *js, gc_mark_fn mark);
+void gc_mark_sandbox(ant_t *js, gc_mark_fn mark);
+void gc_clear_napi_weak_refs(ant_t *js, bool minor);
+void gc_mark_abort_signal_object(ant_t *js, ant_value_t signal, gc_mark_fn mark);
+
+#endif

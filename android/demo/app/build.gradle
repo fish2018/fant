@@ -1,0 +1,82 @@
+plugins {
+    id "com.android.application"
+}
+
+def configuredAbis = (project.findProperty("antAbis") ?: "arm64-v8a")
+        .toString()
+        .split(",")
+        .collect { it.trim() }
+        .findAll { !it.isEmpty() }
+def configuredMinSdk = (project.findProperty("antMinSdk") ?: "24").toString().toInteger()
+def configuredAar = (project.findProperty("antAar") ?: "../build/ant-runtime.aar").toString()
+def configuredAarFile = new File(configuredAar)
+if (!configuredAarFile.isAbsolute()) {
+    configuredAarFile = rootProject.file(configuredAar)
+}
+
+// Release signing is configured through environment variables by
+// android/build-demo.sh. Keeping the credentials out of the Gradle command
+// line prevents passwords from appearing in process listings or build logs.
+def signingStoreFilePath = (project.findProperty("antSigningStoreFile") ?: System.getenv("ANT_DEMO_KEYSTORE") ?: "").toString()
+def signingKeyAlias = (project.findProperty("antSigningKeyAlias") ?: System.getenv("ANT_DEMO_KEY_ALIAS") ?: "").toString()
+def signingStorePassword = (project.findProperty("antSigningStorePassword") ?: System.getenv("ANT_DEMO_STORE_PASSWORD") ?: "").toString()
+def signingKeyPassword = (project.findProperty("antSigningKeyPassword") ?: System.getenv("ANT_DEMO_KEY_PASSWORD") ?: signingStorePassword).toString()
+def hasReleaseSigning = signingStoreFilePath && signingKeyAlias && signingStorePassword && signingKeyPassword
+def releaseTaskRequested = gradle.startParameter.taskNames.any { it.toLowerCase().contains("release") }
+def requireReleaseSigning = releaseTaskRequested || (project.findProperty("antRequireReleaseSigning") ?: "false").toString().toBoolean()
+
+android {
+    namespace "org.antjs.runtime.demo"
+    compileSdk 37
+
+    signingConfigs {
+        if (hasReleaseSigning) {
+            release {
+                storeFile new File(signingStoreFilePath)
+                storePassword signingStorePassword
+                keyAlias signingKeyAlias
+                keyPassword signingKeyPassword
+                enableV1Signing false
+                enableV2Signing true
+                enableV3Signing true
+                enableV4Signing false
+            }
+        }
+    }
+
+    defaultConfig {
+        applicationId "org.antjs.runtime.demo"
+        minSdk configuredMinSdk
+        targetSdk 34
+        versionCode 1
+        versionName "1.0"
+
+        ndk {
+            configuredAbis.each { abiFilters it }
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_1_8
+        targetCompatibility JavaVersion.VERSION_1_8
+    }
+
+    buildTypes {
+        release {
+            // Gradle emits the final aligned, signed APK directly. There is
+            // deliberately no unsigned release artifact in the public output.
+            if (requireReleaseSigning && !hasReleaseSigning) {
+                throw new GradleException("Release signing is not configured. Set ANT_DEMO_KEYSTORE, ANT_DEMO_KEY_ALIAS, ANT_DEMO_STORE_PASSWORD and ANT_DEMO_KEY_PASSWORD.")
+            }
+            if (hasReleaseSigning) {
+                signingConfig signingConfigs.release
+            }
+            minifyEnabled false
+            shrinkResources false
+        }
+    }
+}
+
+dependencies {
+    implementation files(configuredAarFile)
+}

@@ -1,0 +1,26 @@
+<!doctype html>
+<meta charset="utf-8" />
+<title>Ant IPC test</title>
+<script>
+  (async () => {
+    const cyclic = { source: 'renderer' };
+    cyclic.self = cyclic;
+    const reply = await Ant.ipc.invoke('test:echo', {
+      cyclic,
+      bytes: new Uint8Array([7, 11, 42]),
+      bigint: 9007199254740993n
+    });
+    if (reply.cyclic !== reply.cyclic.self || reply.bytes[2] !== 42 || reply.bigint !== 9007199254740993n) {
+      throw new Error('structured IPC reply was corrupted');
+    }
+    Ant.ipc.on('test:event', value => {
+      if (value.kind !== 'main-event' || value.bytes[0] !== 99) {
+        throw new Error('main-to-renderer event was corrupted');
+      }
+      Ant.ipc.send('test:done', { ok: true });
+    });
+    Ant.ipc.send('test:ready', { ready: true });
+  })().catch(error => {
+    Ant.ipc.send('test:error', { message: error.message, stack: error.stack });
+  });
+</script>

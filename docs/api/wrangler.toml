@@ -1,0 +1,25 @@
+name = "ant-manifest"
+main = "src/routes.ts"
+
+workers_dev = false
+compatibility_date = "2026-05-24"
+
+[vars]
+CACHE_TTL_SECONDS = "300"
+
+GITHUB_BRANCH = "main"
+GITHUB_REPOSITORY = "fish2018/fant"
+
+GITHUB_RELEASE_REPOSITORY = "fish2018/fant"
+GITHUB_ACTION_REPOSITORIES = "sf-tools/ant,fish2018/fant"
+
+[[r2_buckets]]
+binding = "DOWNLOADS"
+bucket_name = "ant-downloads"
+
+[observability]
+enabled = true
+
+[[routes]]
+pattern = "manifest.antjs.org"
+custom_domain = true

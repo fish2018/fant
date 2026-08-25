@@ -1,0 +1,349 @@
+#include "internal.h"
+#include "runtime.h"
+#include "descriptors.h"
+#include "esm/loader.h"
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <uthash.h>
+#include <argtable3.h>
+
+#ifdef _WIN32
+#include <process.h>
+#define ant_getpid _getpid
+#else
+#include <unistd.h>
+#define ant_getpid getpid
+#endif
+
+typedef struct {
+  const char *ptr;
+  size_t len;
+  UT_hash_handle hh;
+} intern_entry_t;
+
+typedef struct code_block {
+  struct code_block *next;
+  size_t used;
+  size_t capacity;
+  char data[];
+} code_block_t;
+
+static_assert(
+  (CODE_ARENA_ALIGNMENT & (CODE_ARENA_ALIGNMENT - 1u)) == 0,
+  "code arena alignment must be a power of two"
+);
+static_assert(
+  offsetof(code_block_t, data) % CODE_ARENA_ALIGNMENT == 0,
+  "code arena block payload must satisfy the arena alignment"
+);
+
+static intern_entry_t *code_interns = NULL;
+
+static code_block_t *code_arena_head     = NULL;
+static code_block_t *code_arena_current  = NULL;
+static code_block_t *parse_arena_head    = NULL;
+static code_block_t *parse_arena_current = NULL;
+
+static void code_interns_prune_for_block_range(
+  const code_block_t *block,
+  size_t start_offset
+) {
+  if (!block) return;
+
+  const char *start = block->data + start_offset;
+  const char *end = block->data + block->capacity;
+  intern_entry_t *entry = NULL;
+  intern_entry_t *tmp = NULL;
+
+  HASH_ITER(hh, code_interns, entry, tmp)
+  if (entry->ptr >= start && entry->ptr < end) {
+    HASH_DEL(code_interns, entry);
+    free(entry);
+  }
+}
+
+static void code_interns_prune_for_blocks(code_block_t *first) {
+  for (
+    code_block_t *block = first; 
+    block; block = block->next
+  ) code_interns_prune_for_block_range(block, 0);
+}
+
+static code_block_t *code_arena_new_block(size_t min_size) {
+  size_t capacity = CODE_ARENA_BLOCK_SIZE;
+  if (min_size > capacity) capacity = min_size;
+
+  code_block_t *block = malloc(sizeof(code_block_t) + capacity);
+  if (!block) return NULL;
+
+  block->next = NULL;
+  block->used = 0;
+  block->capacity = capacity;
+  return block;
+}
+
+static void *arena_bump(
+  code_block_t **head,
+  code_block_t **current,
+  size_t size
+) {
+  const size_t align_mask = (size_t)CODE_ARENA_ALIGNMENT - 1u;
+  size = (size + align_mask) & ~align_mask;
+  
+  size_t used = *current
+    ? ((*current)->used + align_mask) & ~align_mask : 0;
+    
+  if (!*current || used + size > (*current)->capacity) {
+    code_block_t *new_block = code_arena_new_block(size);
+    
+    if (!new_block) return NULL;
+    if (!*head) *head = new_block;
+    else if (*current) (*current)->next = new_block;
+    
+    *current = new_block;
+    used = 0;
+  }
+
+  void *ptr = &(*current)->data[used];
+  (*current)->used = used + size;
+  
+  return ptr;
+}
+
+static size_t arena_get_memory(code_block_t *head) {
+  size_t total = 0;
+  for (code_block_t *b = head; b; b = b->next)
+    total += sizeof(code_block_t) + b->capacity;
+  return total;
+}
+
+static code_arena_mark_t arena_mark(code_block_t *current) {
+  code_arena_mark_t mark = {0};
+  mark.block = current;
+  mark.used = current ? current->used : 0;
+  return mark;
+}
+
+static void arena_rewind_plain(
+  code_block_t **head,
+  code_block_t **current,
+  code_arena_mark_t mark
+) {
+  code_block_t *target = (code_block_t *)mark.block;
+
+  if (!target) {
+    code_block_t *block = *head;
+    while (block) {
+      code_block_t *next = block->next;
+      free(block);
+      block = next;
+    }
+    *head = NULL;
+    *current = NULL;
+    return;
+  }
+
+  size_t clamped_used = mark.used <= target->capacity ? mark.used : target->capacity;
+  target->used = clamped_used;
+
+  code_block_t *b = target->next;
+  while (b) {
+    code_block_t *next = b->next;
+    free(b);
+    b = next;
+  }
+
+  target->next = NULL;
+  *current = target;
+}
+
+const char *code_arena_alloc(const char *code, size_t len) {
+  if (!code || len == 0) return NULL;
+
+  intern_entry_t *found = NULL;
+  HASH_FIND(hh, code_interns, code, len, found);
+  if (found) return found->ptr;
+
+  size_t alloc_size = len + 1;
+  if (!code_arena_current || code_arena_current->used + alloc_size > code_arena_current->capacity) {
+    code_block_t *new_block = code_arena_new_block(alloc_size);
+    if (!new_block) return NULL;
+    if (!code_arena_head) code_arena_head = new_block;
+    else if (code_arena_current) code_arena_current->next = new_block;
+    code_arena_current = new_block;
+  }
+
+  char *dest = &code_arena_current->data[code_arena_current->used];
+  memcpy(dest, code, len);
+  dest[len] = '\0';
+  code_arena_current->used += alloc_size;
+
+  intern_entry_t *entry = malloc(sizeof(*entry));
+  if (entry) {
+    entry->ptr = dest;
+    entry->len = len;
+    HASH_ADD_KEYPTR(hh, code_interns, entry->ptr, entry->len, entry);
+  }
+
+  return dest;
+}
+
+void *code_arena_bump(size_t size) {
+  return arena_bump(&code_arena_head, &code_arena_current, size);
+}
+
+size_t code_arena_get_memory(void) {
+  return arena_get_memory(code_arena_head);
+}
+
+code_arena_mark_t code_arena_mark(void) {
+  return arena_mark(code_arena_current);
+}
+
+void code_arena_rewind(code_arena_mark_t mark) {
+  code_block_t *target = (code_block_t *)mark.block;
+
+  if (!target) {
+    code_interns_prune_for_blocks(code_arena_head);
+    code_block_t *block = code_arena_head;
+    
+    while (block) {
+      code_block_t *next = block->next;
+      free(block); block = next;
+    }
+    
+    code_arena_head = NULL;
+    code_arena_current = NULL;
+    
+    return;
+  }
+
+  size_t clamped_used = mark.used <= target->capacity ? mark.used : target->capacity;
+  code_interns_prune_for_block_range(target, clamped_used);
+  code_interns_prune_for_blocks(target->next);
+
+  if (mark.used <= target->capacity) target->used = mark.used;
+  code_block_t *b = target->next;
+  
+  while (b) {
+    code_block_t *next = b->next;
+    free(b); b = next;
+  }
+  
+  target->next = NULL;
+  code_arena_current = target;
+}
+
+void *parse_arena_bump(size_t size) {
+  return arena_bump(&parse_arena_head, &parse_arena_current, size);
+}
+
+size_t parse_arena_get_memory(void) {
+  return arena_get_memory(parse_arena_head);
+}
+
+code_arena_mark_t parse_arena_mark(void) {
+  return arena_mark(parse_arena_current);
+}
+
+void parse_arena_rewind(code_arena_mark_t mark) {
+  arena_rewind_plain(&parse_arena_head, &parse_arena_current, mark);
+}
+
+void parse_arena_reset(void) {
+  parse_arena_rewind((code_arena_mark_t){0});
+}
+
+void code_arena_reset(void) {
+  intern_entry_t *entry, *tmp;
+  HASH_ITER(hh, code_interns, entry, tmp) {
+    HASH_DEL(code_interns, entry);
+    free(entry);
+  }
+  code_interns = NULL;
+
+  code_block_t *block = code_arena_head;
+  while (block) {
+    code_block_t *next = block->next;
+    free(block);
+    block = next;
+  }
+  
+  code_arena_head = NULL;
+  code_arena_current = NULL;
+  parse_arena_reset();
+}
+
+void ant_runtime_init(ant_t *js, int argc, char **argv, struct arg_file *ls_p) {
+  ant_value_t global = js_glob(js);
+
+  js->Ant = js_newobj(js);
+  js->runtime.flags = 0;
+  js->runtime.argc = argc;
+  js->runtime.argv = argv;
+  js->runtime.pid = (int)ant_getpid();
+  js->runtime.ls_fp = (ls_p && ls_p->count > 0) ? ls_p->filename[0] : NULL;
+
+  js_set(js, global, "onerror", js_mknull());
+  js_set_descriptor(js, global, "onerror", 7, JS_DESC_W | JS_DESC_C);
+
+  js_set(js, global, "onunhandledrejection", js_mknull());
+  js_set_descriptor(js, global, "onunhandledrejection", 20, JS_DESC_W | JS_DESC_C);
+
+  js_set(js, global, "onrejectionhandled", js_mknull());
+  js_set_descriptor(js, global, "onrejectionhandled", 18, JS_DESC_W | JS_DESC_C);
+  
+  js_set(js, global, "self", global);
+  js_set_descriptor(js, global, "self", 4, JS_DESC_W | JS_DESC_C);
+  
+  js_set(js, global, "window", global);
+  js_set_descriptor(js, global, "window", 6, JS_DESC_W | JS_DESC_C);
+
+  js_set(js, global, "global", global);
+  js_set_descriptor(js, global, "global", 6, JS_DESC_W | JS_DESC_E | JS_DESC_C);
+
+  js_set(js, global, "globalThis", global);
+  js_set_descriptor(js, global, "globalThis", 10, JS_DESC_W | JS_DESC_C);
+
+  js_set(js, global, "Ant", js->Ant);
+  js_set_descriptor(js, global, "Ant", 3, JS_DESC_E);
+}
+
+void ant_runtime_set_argv(ant_t *js, int argc, char **argv) {
+  if (argc < 0 || (argc > 0 && argv == NULL)) {
+    js->runtime.argc = 0;
+    js->runtime.argv = NULL;
+    return;
+  }
+  js->runtime.argc = argc;
+  js->runtime.argv = argv;
+}
+
+bool ant_runtime_set_storage(
+  ant_t *js,
+  ant_storage_location_t location,
+  const ant_storage_bridge_t *bridge
+) {
+  if (!js) return false;
+  ant_storage_context_t *next = ant_storage_context_create(location, bridge);
+  if (!next) return false;
+  if (js->storage) {
+    js_esm_cleanup_module_cache(js);
+    ant_storage_context_destroy(js->storage);
+  }
+  js->storage = next;
+  return true;
+}
+
+void ant_runtime_clear_storage(ant_t *js) {
+  if (!js || !js->storage) return;
+  js_esm_cleanup_module_cache(js);
+  ant_storage_context_destroy(js->storage);
+  js->storage = NULL;
+}
+
+const ant_storage_context_t *ant_runtime_storage(const ant_t *js) {
+  return js ? js->storage : NULL;
+}
