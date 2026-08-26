@@ -2422,6 +2422,7 @@ pub const Resolver = struct {
   fn ensureNpmFallbackFetcher(self: *Resolver) !*fetcher.Fetcher {
     if (self.npm_fallback_http) |http| return http;
     const http = try fetcher.Fetcher.init(self.cache_allocator, NPM_FALLBACK_HOST);
+    http.setCancellation(self.http.cancel_callback, self.http.cancel_user_data);
     self.npm_fallback_http = http;
     return http;
   }

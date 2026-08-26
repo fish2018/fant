@@ -27,6 +27,10 @@ typedef struct code_block {
   struct code_block *next;
   size_t used;
   size_t capacity;
+#if UINTPTR_MAX == UINT32_MAX
+  // The three native words above occupy only 12 bytes on 32-bit targets.
+  uint32_t alignment_pad;
+#endif
   char data[];
 } code_block_t;
 
@@ -81,6 +85,9 @@ static code_block_t *code_arena_new_block(size_t min_size) {
   block->next = NULL;
   block->used = 0;
   block->capacity = capacity;
+#if UINTPTR_MAX == UINT32_MAX
+  block->alignment_pad = 0;
+#endif
   return block;
 }
 

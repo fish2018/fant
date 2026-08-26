@@ -7,9 +7,6 @@ ROOT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 NDK_ROOT="${ANDROID_NDK_ROOT:-${ANDROID_NDK_HOME:-}}"
 BUILD_ROOT="${ANT_ANDROID_BUILD_DIR:-$SCRIPT_DIR/build}"
 MIN_SDK=24
-# Ant's value representation and optimizing VM currently require a 64-bit
-# pointer layout. These are the Android phone/TV ABIs covered by this
-# embedding layer; 32-bit ARM is rejected explicitly below.
 ABIS=(arm64-v8a)
 
 usage() {
@@ -154,6 +151,9 @@ LLVM_READELF="$TOOLCHAIN/bin/llvm-readelf"
 abi_cpu_family() {
   case "$1" in
     arm64-v8a) echo aarch64 ;;
+    # Keep Meson's canonical ARM32 family name. Individual CMake subprojects
+    # receive their processor spelling explicitly where required.
+    armeabi-v7a) echo arm ;;
     x86_64) echo x86_64 ;;
     *) return 1 ;;
   esac
@@ -162,6 +162,7 @@ abi_cpu_family() {
 abi_cpu() {
   case "$1" in
     arm64-v8a) echo armv8-a ;;
+    armeabi-v7a) echo armv7-a ;;
     x86_64) echo x86-64 ;;
     *) return 1 ;;
   esac
@@ -170,7 +171,17 @@ abi_cpu() {
 abi_triple() {
   case "$1" in
     arm64-v8a) echo aarch64-linux-android ;;
+    armeabi-v7a) echo armv7a-linux-androideabi ;;
     x86_64) echo x86_64-linux-android ;;
+    *) return 1 ;;
+  esac
+}
+
+abi_cmake_processor() {
+  case "$1" in
+    arm64-v8a) echo aarch64 ;;
+    armeabi-v7a) echo armv7-a ;;
+    x86_64) echo x86_64 ;;
     *) return 1 ;;
   esac
 }
@@ -200,10 +211,15 @@ write_cross_file() {
   local ar="$TOOLCHAIN/bin/llvm-ar"
   local ranlib="$TOOLCHAIN/bin/llvm-ranlib"
   local strip="$TOOLCHAIN/bin/llvm-strip"
+  local cmake_override="${output%/*}/cmake-toolchain-overrides.cmake"
 
   for tool in "$compiler" "$cxx_compiler" "$ar" "$ranlib" "$strip"; do
     [[ -x "$tool" ]] || { echo "Missing NDK tool: $tool" >&2; exit 2; }
   done
+
+  printf '%s\n' \
+    '# Meson passes this file to CMake subprojects for every Android ABI.' \
+    "set(CMAKE_SYSTEM_PROCESSOR \"$(abi_cmake_processor "$abi")\")" > "$cmake_override"
 
   printf '%s\n' \
     '[binaries]' \
@@ -220,6 +236,7 @@ write_cross_file() {
     "endian = 'little'" \
     '[properties]' \
     'needs_exe_wrapper = true' \
+    "cmake_toolchain_file = '$cmake_override'" \
     '[built-in options]' \
     "c_args = ['-ffunction-sections', '-fdata-sections']" \
     "cpp_args = ['-ffunction-sections', '-fdata-sections']" \
@@ -306,11 +323,13 @@ for abi in "${ABIS[@]}"; do
   [[ -f "$LIBANT_DIST/pkg.h" ]] || cp "$ROOT_DIR/include/pkg.h" "$LIBANT_DIST/pkg.h"
 
   echo "==> Building JNI bridge for $abi"
+  CMAKE_PROCESSOR="$(abi_cmake_processor "$abi")"
   cmake -S "$SCRIPT_DIR" -B "$JNI_BUILD" \
     -G Ninja \
     -DCMAKE_TOOLCHAIN_FILE="$ANDROID_CMAKE" \
     -DANDROID_ABI="$abi" \
     -DANDROID_PLATFORM="android-$MIN_SDK" \
+    -DCMAKE_SYSTEM_PROCESSOR="$CMAKE_PROCESSOR" \
     -DANDROID_STL=c++_static \
     -DANT_LIB_DIR="$LIBANT_DIST" \
     -DANT_PKG_DIR="$LIBANT_DIST" \

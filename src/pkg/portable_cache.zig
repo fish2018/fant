@@ -198,6 +198,23 @@ pub const PortableCache = struct {
     defer self.allocator.free(marker_path);
     storage.remove(self.context, package_path, true) catch {};
     storage.remove(self.context, marker_path, false) catch {};
+
+    // Remove name aliases that still point at this package. Leaving these
+    // aliases behind makes a physically deleted package look cached on the
+    // next lookup and causes repeated failed installs.
+    const names = storage.list(self.context, "names", self.allocator) catch return;
+    defer storage.freeEntries(self.allocator, names);
+    const expected = integrityHex(integrity);
+    for (names) |entry| {
+      if (entry.is_directory) continue;
+      const name_path = storage.join(self.allocator, "names", entry.name) catch continue;
+      defer self.allocator.free(name_path);
+      const data = storage.read(self.context, name_path, self.allocator) catch continue;
+      defer self.allocator.free(data);
+      if (std.mem.eql(u8, data, &expected)) {
+        storage.remove(self.context, name_path, false) catch {};
+      }
+    }
   }
 
   pub fn lookupMetadata(

@@ -52,6 +52,19 @@ pub const StatsSnapshot = struct {
   packages_skipped: u32,
 };
 
+fn atomicSaturatingAdd(counter: *std.atomic.Value(usize), amount: u64) void {
+  const increment = std.math.cast(usize, amount) orelse std.math.maxInt(usize);
+  var current = counter.load(.monotonic);
+  while (true) {
+    const next = current +| increment;
+    if (counter.cmpxchgWeak(current, next, .release, .monotonic)) |observed| {
+      current = observed;
+    } else {
+      return;
+    }
+  }
+}
+
 pub const StorageLinker = struct {
   allocator: std.mem.Allocator,
   source: *const storage.Context,
@@ -149,18 +162,26 @@ pub const StorageLinker = struct {
       destination,
       self.allocator,
     );
-    const copied_files = try storage.countFiles(
-      self.destination,
-      destination,
-      self.allocator,
-    );
-    if (pkg.file_count != 0 and copied_files < pkg.file_count) return error.IoError;
-    self.stats.files_copied +|= copied_files;
-    self.stats.bytes_copied +|= try storage.treeSize(
-      self.destination,
-      destination,
-      self.allocator,
-    );
+    // SAF providers make recursive stat/list walks particularly expensive.
+    // Extraction already recorded the package file count and byte size in the
+    // cache index, so do not rescan the newly-copied tree just for diagnostics.
+    // FILE_PATH retains the old verification and exact counters.
+    if (storage.kind(self.destination) == 1) {
+      self.stats.files_copied +|= pkg.file_count;
+    } else {
+      const copied_files = try storage.countFiles(
+        self.destination,
+        destination,
+        self.allocator,
+      );
+      if (pkg.file_count != 0 and copied_files < pkg.file_count) return error.IoError;
+      self.stats.files_copied +|= copied_files;
+      self.stats.bytes_copied +|= try storage.treeSize(
+        self.destination,
+        destination,
+        self.allocator,
+      );
+    }
     self.stats.packages_installed += 1;
 
     if (pkg.parent_path == null and pkg.has_bin) try self.writeBins(pkg);
@@ -211,8 +232,11 @@ pub const LinkStats = struct {
   files_linked: std.atomic.Value(u32),
   files_copied: std.atomic.Value(u32),
   files_cloned: std.atomic.Value(u32),
-  bytes_linked: std.atomic.Value(u64),
-  bytes_copied: std.atomic.Value(u64),
+  // Zig's ARM32 backend only provides lock-free atomics up to the native word
+  // size. These are diagnostic counters, so keep them exact on 64-bit targets
+  // and saturate instead of wrapping once a 32-bit process accounts for 4 GiB.
+  bytes_linked: std.atomic.Value(usize),
+  bytes_copied: std.atomic.Value(usize),
   dirs_created: std.atomic.Value(u32),
   bins_linked: std.atomic.Value(u32),
   packages_installed: std.atomic.Value(u32),
@@ -223,8 +247,8 @@ pub const LinkStats = struct {
       .files_linked = std.atomic.Value(u32).init(0),
       .files_copied = std.atomic.Value(u32).init(0),
       .files_cloned = std.atomic.Value(u32).init(0),
-      .bytes_linked = std.atomic.Value(u64).init(0),
-      .bytes_copied = std.atomic.Value(u64).init(0),
+      .bytes_linked = std.atomic.Value(usize).init(0),
+      .bytes_copied = std.atomic.Value(usize).init(0),
       .dirs_created = std.atomic.Value(u32).init(0),
       .bins_linked = std.atomic.Value(u32).init(0),
       .packages_installed = std.atomic.Value(u32).init(0),
@@ -237,8 +261,8 @@ pub const LinkStats = struct {
       .files_linked = self.files_linked.load(.acquire),
       .files_copied = self.files_copied.load(.acquire),
       .files_cloned = self.files_cloned.load(.acquire),
-      .bytes_linked = self.bytes_linked.load(.acquire),
-      .bytes_copied = self.bytes_copied.load(.acquire),
+      .bytes_linked = @intCast(self.bytes_linked.load(.acquire)),
+      .bytes_copied = @intCast(self.bytes_copied.load(.acquire)),
       .dirs_created = self.dirs_created.load(.acquire),
       .bins_linked = self.bins_linked.load(.acquire),
       .packages_installed = self.packages_installed.load(.acquire),
@@ -1296,7 +1320,7 @@ pub const Linker = struct {
     else
       try copyFileBuffered(source, dest);
 
-    _ = self.stats.bytes_copied.fetchAdd(bytes_copied, .release);
+    atomicSaturatingAdd(&self.stats.bytes_copied, bytes_copied);
   }
 
   fn copyFileLinux(self: *Linker, source_fd: std.posix.fd_t, dest_fd: std.posix.fd_t) !u64 {

@@ -176,21 +176,27 @@ static inline void sv_ic_set_cached_shape(
   );
 }
 
+#if UINTPTR_MAX > UINT32_MAX
 #define SV_GF_IC_PROTO_ID_MASK \
   ((uintptr_t)UINT32_MAX << SV_GF_IC_PROTO_ID_SHIFT)
-
-static_assert(
-  UINTPTR_MAX > UINT32_MAX,
-  "property IC prototype identities require a 64-bit uintptr_t"
-);
+#endif
 
 static inline uint32_t sv_gf_ic_proto_id(uintptr_t aux) {
+#if UINTPTR_MAX <= UINT32_MAX
+  (void)aux;
+  return 0;
+#else
   return (uint32_t)(aux >> SV_GF_IC_PROTO_ID_SHIFT);
+#endif
 }
 
 static inline void sv_gf_ic_set_proto_id(sv_ic_entry_t *ic, uint32_t id) {
+#if UINTPTR_MAX <= UINT32_MAX
+  if (ic) ic->cached_proto_id = id;
+#else
   ic->cached_aux = (ic->cached_aux & ~SV_GF_IC_PROTO_ID_MASK) |
     ((uintptr_t)id << SV_GF_IC_PROTO_ID_SHIFT);
+#endif
 }
 
 static inline uint32_t sv_ic_object_identity(ant_t *js, ant_object_t *obj) {
@@ -226,8 +232,12 @@ static inline bool sv_ic_try_get_hit(
     if (receiver->proto != ic->guard.receiver_proto) return false;
     if (!is_object_type(receiver->proto)) return false;
     ant_object_t *proto = js_obj_ptr(js_as_obj(receiver->proto));
-    if (!proto || proto->ic_identity != sv_gf_ic_proto_id(ic->cached_aux))
-      return false;
+    if (!proto) return false;
+#if UINTPTR_MAX <= UINT32_MAX
+    if (proto->ic_identity != ic->cached_proto_id) return false;
+#else
+    if (proto->ic_identity != sv_gf_ic_proto_id(ic->cached_aux)) return false;
+#endif
     ant_object_t *holder = ic->cached_holder;
     if (!holder || holder->flags.is_exotic || !holder->shape) return false;
     source = holder;
@@ -394,6 +404,10 @@ static inline void sv_ic_guard_absent_prefix(
 }
 
 static inline uintptr_t sv_prim_neg_pack_shape(uintptr_t aux, const ant_shape_t *shape2) {
+#if UINTPTR_MAX <= UINT32_MAX
+  (void)shape2;
+  return aux & SV_GF_IC_AUX_ALL_MASK;
+#else
 #if UINTPTR_MAX > UINT32_MAX
   ANT_ASSERT(
     ((uintptr_t)shape2 >> 50) == 0,
@@ -403,10 +417,30 @@ static inline uintptr_t sv_prim_neg_pack_shape(uintptr_t aux, const ant_shape_t 
   return (aux & SV_GF_IC_AUX_ALL_MASK) | (
     ((uintptr_t)shape2 >> SV_PRIM_NEG_ALIGN_BITS) << SV_PRIM_NEG_AUX_SHIFT
   );
+#endif
 }
 
 static inline ant_shape_t *sv_prim_neg_unpack_shape(uintptr_t aux) {
+#if UINTPTR_MAX <= UINT32_MAX
+  (void)aux;
+  return NULL;
+#else
   return (ant_shape_t *)((aux >> SV_PRIM_NEG_AUX_SHIFT) << SV_PRIM_NEG_ALIGN_BITS);
+#endif
+}
+
+static inline void sv_ic_set_primitive_shape(
+  ant_t *js, sv_ic_entry_t *ic, ant_shape_t *shape
+) {
+#if UINTPTR_MAX <= UINT32_MAX
+  sv_ic_set_shape_ref(
+    js, ic, &ic->cached_primitive_shape, SV_IC_SHAPE_REF_PRIM_NEG, shape
+  );
+#else
+  (void)js;
+  (void)ic;
+  (void)shape;
+#endif
 }
 
 static inline bool sv_ic_try_get_miss_prim(
@@ -426,6 +460,9 @@ static inline bool sv_ic_try_get_miss_prim(
   if (!holder1 || !holder1->shape || holder1->shape != ic->cached_shape) return false;
 
   ant_shape_t *shape2 = sv_prim_neg_unpack_shape(ic->cached_aux);
+#if UINTPTR_MAX <= UINT32_MAX
+  shape2 = ic->cached_primitive_shape;
+#endif
   ant_value_t next = holder1->proto;
   
   if (shape2) {
@@ -715,6 +752,7 @@ static inline bool sv_prim_ic_lookup(
     ic->cached_index = 0;
     ic->cached_is_own = false;
     ic->guard.receiver_proto = mkval(pt, SV_PRIM_IC_MISS_DATA);
+    sv_ic_set_primitive_shape(js, ic, shape2);
     ic->cached_aux = sv_prim_neg_pack_shape(ic->cached_aux, shape2);
     ic->epoch = ant_ic_epoch_counter;
     *out = js_mkundef();

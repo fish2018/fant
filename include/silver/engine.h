@@ -114,6 +114,12 @@ typedef struct {
   uint32_t cached_index;
   uint32_t epoch;
   uintptr_t cached_aux;
+#if UINTPTR_MAX <= UINT32_MAX
+  // 32-bit hosts cannot pack a 32-bit identity above the IC state bits in
+  // cached_aux, nor can they pack a shape pointer into that field.
+  uint32_t cached_proto_id;
+  ant_shape_t *cached_primitive_shape;
+#endif
   
   // each IC slot belongs to one bytecode site/op. comparison ICs need both
   // their direct-prototype value and object-lifetime epoch simultaneously.
@@ -137,15 +143,21 @@ typedef struct {
   uint32_t prototype_epoch;
 } sv_ic_entry_t;
 
-static_assert(
-  sizeof(sv_ic_entry_t) == 64,
-  "IC entries must remain one cache line"
-);
+#if UINTPTR_MAX > UINT32_MAX
+static_assert(sizeof(sv_ic_entry_t) == 64,
+  "64-bit IC entries must remain one cache line");
+#else
+static_assert(sizeof(sv_ic_entry_t) <= 64,
+  "32-bit IC entries must remain within one cache line");
+#endif
 
 enum {
   SV_IC_SHAPE_REF_CACHED   = 1u << 0,
   SV_IC_SHAPE_REF_ADD_FROM = 1u << 1,
   SV_IC_SHAPE_REF_ADD_TO   = 1u << 2,
+#if UINTPTR_MAX <= UINT32_MAX
+  SV_IC_SHAPE_REF_PRIM_NEG = 1u << 3,
+#endif
 };
 
 bool sv_ic_shape_ref_register(ant_t *js, ant_shape_t **slot);

@@ -19,6 +19,8 @@ import java.net.InetAddress;
 import java.net.NetworkInterface;
 import java.net.URL;
 import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
 import java.util.Enumeration;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -27,10 +29,11 @@ import java.util.concurrent.Executors;
 final class AntBackendController {
     interface Listener {
         void onLog(String message);
+        void onInstallProgress(String message, int current, int total);
         void onReady(String baseUrl);
         void onStopped();
         void onBackendError(String message);
-        void onInstallFinished(boolean success);
+        void onInstallFinished(boolean success, boolean cancelled);
     }
 
     private enum State { STOPPED, STARTING, READY, STOPPING, CLOSED }
@@ -51,12 +54,23 @@ final class AntBackendController {
     private AntRuntime runtime;
     private StorageLocation projectLocation;
     private StorageLocation cacheLocation;
+    private volatile String registryUrl = "https://registry.npmjs.org";
     private boolean pumping;
     private int readyChecks;
     private volatile boolean installing;
+    private volatile long installStartedAtMs;
+    private volatile long installLastProgressAtMs;
+    private volatile String installLastProgress = "";
+    private volatile int installProgressCurrent;
+    private volatile int installProgressTotal;
     private volatile boolean closeRequested;
+    private volatile boolean installCancelRequested;
     private volatile int restartFailures;
     private volatile long nextRestartAtMs;
+    private volatile String installedProjectKey;
+    private volatile String installedCacheKey;
+    private volatile String installedPackageJsonFingerprint;
+    private volatile String installedRegistry;
 
     private AntBackendController(Context context, Listener listener) {
         this.context = context.getApplicationContext();
@@ -90,6 +104,10 @@ final class AntBackendController {
         return cacheLocation;
     }
 
+    void setRegistryUrl(String value) {
+        if (value != null && value.length() > 0) registryUrl = value;
+    }
+
     /** Compatibility overload: strings are accepted only as real absolute paths. */
     void setCacheDirectory(String path) {
         if (path == null || path.length() == 0) {
@@ -105,6 +123,15 @@ final class AntBackendController {
 
     boolean isStartingOrReady() {
         return state == State.STARTING || state == State.READY;
+    }
+
+    boolean isInstalling() {
+        return installing;
+    }
+
+    long installElapsedMs() {
+        if (installStartedAtMs == 0L) return 0L;
+        return Math.max(0L, SystemClock.elapsedRealtime() - installStartedAtMs);
     }
 
     boolean isClosed() {
@@ -206,13 +233,13 @@ final class AntBackendController {
             postInstallFinished(false);
             return;
         }
-        installing = true;
+        beginInstallProgress();
         closeRequested = false;
+        installCancelRequested = false;
         ensureRuntimeThread();
         Handler handler = runtimeHandler;
         if (handler == null) {
-            installing = false;
-            postInstallFinished(false);
+            finishInstallProgress(true, false);
             return;
         }
         handler.post(() -> installOnRuntimeThread(project));
@@ -253,6 +280,16 @@ final class AntBackendController {
     }
 
     void stop() {
+        if (installing || state == State.STARTING) {
+            installCancelRequested = true;
+            state = State.STOPPING;
+            AntRuntime current = runtime;
+            if (current != null) {
+                current.cancelInstall();
+            }
+            log(installing ? "正在停止依赖安装…" : "正在停止后端启动…");
+            return;
+        }
         Handler handler = runtimeHandler;
         if (handler == null || state == State.STOPPED || state == State.STOPPING
                 || state == State.CLOSED) return;
@@ -291,6 +328,12 @@ final class AntBackendController {
                 shutdownOnRuntimeThread();
                 return;
             }
+            if (installCancelRequested) {
+                installCancelRequested = false;
+                state = State.STOPPED;
+                postStopped();
+                return;
+            }
             prepareProject(project);
             if (runtime == null) {
                 runtime = new AntRuntime(context);
@@ -298,11 +341,23 @@ final class AntBackendController {
             }
 
             log("项目：" + StorageFiles.display(project));
-            log("正在安装 package.json 中声明的 npm 依赖…");
-            AntRuntime.InstallResult installed = runtime.install(project, installOptions());
-            log("依赖安装完成：包 " + installed.packageCount + "，缓存命中 "
-                    + installed.cacheHits + "，下载 " + installed.cacheMisses);
-            logDependencyReport(project);
+            log("npm 依赖源：" + registryUrl);
+            String packageFingerprint = packageJsonFingerprint(project);
+            if (isInstallStateCached(project, packageFingerprint)) {
+                log("依赖已安装且 package.json 未变化，跳过依赖安装流程。");
+            } else {
+                log("正在安装 package.json 中声明的 npm 依赖…");
+                beginInstallProgress();
+                AntRuntime.InstallResult installed;
+                try {
+                    installed = runtime.install(project, installOptions());
+                } finally {
+                    finishInstallProgress(false, false);
+                }
+                rememberInstallState(project, packageFingerprint);
+                log("依赖安装完成：包 " + installed.packageCount + "，缓存命中 "
+                        + installed.cacheHits + "，下载 " + installed.cacheMisses);
+            }
 
             log("正在加载 server.ts…");
             runtime.evaluateFile(project, "server.ts");
@@ -320,6 +375,15 @@ final class AntBackendController {
                 handler.postDelayed(readyRunnable, 50);
             }
         } catch (Throwable error) {
+            if (installCancelRequested) {
+                installCancelRequested = false;
+                state = State.STOPPED;
+                finishInstallProgress(false, false);
+                log("依赖安装已停止。");
+                postStopped();
+                return;
+            }
+            finishInstallProgress(false, false);
             String message = "后端启动失败：" + Log.getStackTraceString(error);
             log(message);
             cleanupFailedStart(message);
@@ -329,38 +393,45 @@ final class AntBackendController {
     private void installOnRuntimeThread(StorageLocation project) {
         boolean success = false;
         try {
-            if (closeRequested) return;
+            if (closeRequested || installCancelRequested) return;
             prepareProject(project);
             if (runtime == null) runtime = new AntRuntime(context);
             log("项目：" + StorageFiles.display(project));
+            log("npm 依赖源：" + registryUrl);
             log("正在安装 npm 依赖…");
+            String packageFingerprint = packageJsonFingerprint(project);
             AntRuntime.InstallResult installed = runtime.install(project, installOptions());
+            rememberInstallState(project, packageFingerprint);
             log("依赖安装完成：包 " + installed.packageCount + "，缓存命中 "
                     + installed.cacheHits + "，下载 " + installed.cacheMisses);
-            logDependencyReport(project);
             success = true;
         } catch (Throwable error) {
-            log("依赖安装失败：" + Log.getStackTraceString(error));
+            if (installCancelRequested) log("依赖安装已停止。");
+            else log("依赖安装失败：" + Log.getStackTraceString(error));
         } finally {
-            installing = false;
-            postInstallFinished(success && !closeRequested);
+            boolean cancelled = installCancelRequested;
+            installCancelRequested = false;
+            state = State.STOPPED;
+            finishInstallProgress(true, success && !cancelled && !closeRequested, cancelled);
             if (closeRequested) shutdownOnRuntimeThread();
-        }
-    }
-
-    private void logDependencyReport(StorageLocation project) {
-        AntRuntime.CompatibilityReport report = runtime.inspectDependencies(project);
-        for (AntRuntime.DependencyReport dependency : report.dependencies) {
-            log("依赖 " + dependency.name + "@" + dependency.version
-                    + " -> " + dependency.category);
-        }
-        if (report.hasBlockingDependencies()) {
-            throw new IllegalStateException("依赖包含 FAnt 当前不支持的 Node API 或原生扩展");
         }
     }
 
     private AntRuntime.InstallOptions installOptions() {
         AntRuntime.InstallOptions options = new AntRuntime.InstallOptions();
+        options.registryUrl = registryUrl;
+        options.verbose = true;
+        options.progressListener = (phase, current, total, message) -> {
+            String[] phases = {"解析依赖", "下载软件包", "解压软件包", "链接文件", "写入缓存", "运行脚本"};
+            String label = phase >= 0 && phase < phases.length ? phases[phase] : "安装依赖";
+            String count = total > 0 ? " " + current + "/" + total : " " + current + "/?";
+            String detail = message == null || message.length() == 0 ? "" : " · " + message;
+            installLastProgressAtMs = SystemClock.elapsedRealtime();
+            installLastProgress = label + count + detail;
+            installProgressCurrent = current;
+            installProgressTotal = total;
+            postInstallProgress(installLastProgress, current, total);
+        };
         StorageLocation cache = cacheLocation;
         if (cache != null) options.cacheLocation = cache;
         return options;
@@ -486,6 +557,49 @@ final class AntBackendController {
         StorageFiles.ensureAsset(context, project, "backend/server.ts", "server.ts");
     }
 
+    private String packageJsonFingerprint(StorageLocation project) throws IOException {
+        byte[] data = StorageFiles.read(context, project, "package.json");
+        try {
+            MessageDigest digest = MessageDigest.getInstance("SHA-256");
+            byte[] hash = digest.digest(data);
+            StringBuilder result = new StringBuilder(hash.length * 2);
+            for (byte value : hash) result.append(String.format("%02x", value & 0xff));
+            return result.toString();
+        } catch (NoSuchAlgorithmException error) {
+            throw new IOException("系统不支持 SHA-256", error);
+        }
+    }
+
+    private String projectKey(StorageLocation project) {
+        return project.kind().ordinal() + ":" + project.value();
+    }
+
+    private boolean isInstallStateCached(StorageLocation project, String packageFingerprint) {
+        if (packageFingerprint == null || installedProjectKey == null
+                || !projectKey(project).equals(installedProjectKey)
+                || !cacheKey().equals(installedCacheKey)
+                || !packageFingerprint.equals(installedPackageJsonFingerprint)
+                || !registryUrl.equals(installedRegistry)) return false;
+        try {
+            return StorageFiles.exists(context, project, "node_modules/.ant/install-state");
+        } catch (IOException error) {
+            log("无法读取依赖安装标记，将重新校验依赖：" + error.getMessage());
+            return false;
+        }
+    }
+
+    private void rememberInstallState(StorageLocation project, String packageFingerprint) {
+        installedProjectKey = projectKey(project);
+        installedCacheKey = cacheKey();
+        installedPackageJsonFingerprint = packageFingerprint;
+        installedRegistry = registryUrl;
+    }
+
+    private String cacheKey() {
+        StorageLocation cache = cacheLocation;
+        return cache == null ? "" : cache.kind().ordinal() + ":" + cache.value();
+    }
+
     private static String readUtf8(InputStream input) throws IOException {
         try (InputStream source = input; ByteArrayOutputStream output = new ByteArrayOutputStream()) {
             byte[] buffer = new byte[8 * 1024];
@@ -502,8 +616,74 @@ final class AntBackendController {
     }
 
     private void postInstallFinished(boolean success) {
+        postInstallFinished(success, false);
+    }
+
+    private void postInstallFinished(boolean success, boolean cancelled) {
         Listener target = listener;
-        if (target != null) mainHandler.post(() -> target.onInstallFinished(success));
+        if (target != null) mainHandler.post(() -> target.onInstallFinished(success, cancelled));
+    }
+
+    private final Runnable installProgressRunnable = new Runnable() {
+        @Override public void run() {
+            if (!installing) return;
+            long elapsed = Math.max(0L, SystemClock.elapsedRealtime() - installStartedAtMs);
+            long seconds = elapsed / 1000L;
+            long sinceProgress = SystemClock.elapsedRealtime() - installLastProgressAtMs;
+            String phase = sinceProgress < 2500L && installLastProgress.length() > 0
+                    ? installLastProgress
+                    : seconds < 8L ? "正在解析 package.json 和 registry…"
+                    : seconds < 45L ? "正在连接依赖源并下载元数据…"
+                    : "依赖安装仍在进行，网络较慢或源响应较慢…";
+            postInstallProgress(phase, installProgressCurrent, installProgressTotal);
+            mainHandler.postDelayed(this, 1000L);
+        }
+    };
+
+    private synchronized void beginInstallProgress() {
+        if (installing) return;
+        installing = true;
+        installStartedAtMs = SystemClock.elapsedRealtime();
+        installLastProgressAtMs = installStartedAtMs;
+        installLastProgress = "";
+        installProgressCurrent = 0;
+        installProgressTotal = 0;
+        postInstallProgress("正在准备安装依赖… 0/?", 0, 0);
+        mainHandler.removeCallbacks(installProgressRunnable);
+        mainHandler.post(installProgressRunnable);
+    }
+
+    private synchronized void finishInstallProgress(boolean notifyFinished, boolean success) {
+        finishInstallProgress(notifyFinished, success, false);
+    }
+
+    private synchronized void finishInstallProgress(
+            boolean notifyFinished, boolean success, boolean cancelled) {
+        if (!installing && !notifyFinished) return;
+        installing = false;
+        mainHandler.removeCallbacks(installProgressRunnable);
+        postInstallProgress(null, 0, 0);
+        if (notifyFinished) postInstallFinished(success, cancelled);
+    }
+
+    private void postInstallProgress(String message, int current, int total) {
+        if (message != null && installing) {
+            long elapsed = installElapsedMs();
+            String progress = total > 0
+                    ? " " + Math.min(100, Math.max(0, (int) (((long) current * 100L) / total)))
+                            + "% (" + current + "/" + total + ")"
+                    : "";
+            message = message + progress + " · 已用 " + formatElapsed(elapsed);
+        }
+        final String deliveredMessage = message;
+        Listener target = listener;
+        if (target != null) mainHandler.post(
+                () -> target.onInstallProgress(deliveredMessage, current, total));
+    }
+
+    private static String formatElapsed(long elapsedMs) {
+        long seconds = elapsedMs / 1000L;
+        return seconds < 60L ? seconds + " 秒" : (seconds / 60L) + " 分 " + (seconds % 60L) + " 秒";
     }
 
     private void postReady(String baseUrl) {

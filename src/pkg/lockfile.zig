@@ -235,13 +235,14 @@ pub const Lockfile = struct {
     if (stat.size < @sizeOf(Header)) {
       return error.InvalidLockfile;
     }
+    const map_len = std.math.cast(usize, stat.size) orelse return error.InvalidLockfile;
     
     if (comptime builtin.os.tag == .windows) {
-      const data = try std.heap.c_allocator.alignedAlloc(u8, std.mem.Alignment.fromByteUnits(@alignOf(Header)), stat.size);
+      const data = try std.heap.c_allocator.alignedAlloc(u8, std.mem.Alignment.fromByteUnits(@alignOf(Header)), map_len);
       errdefer std.heap.c_allocator.free(data);
       
       const bytes_read = try file.readPositionalAll(io, data, 0);
-      if (bytes_read != stat.size) {
+      if (bytes_read != map_len) {
         std.heap.c_allocator.free(data);
         return error.InvalidLockfile;
       }
@@ -249,7 +250,7 @@ pub const Lockfile = struct {
       return initFromDataWindows(data);
     } else {
       const data = try std.posix.mmap(
-        null, stat.size,
+        null, map_len,
         .{ .READ = true },
         .{ .TYPE = .PRIVATE },
         file.handle, 0,

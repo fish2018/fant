@@ -1,7 +1,7 @@
 # FAnt
 
 FAnt（Fish Ant）是基于 Ant JavaScript runtime 的 Android 二开移植版。
-项目重点是把 JavaScript/TypeScript 运行时、npm 依赖安装和文件存储桥接能力集成到手机与电视 App 中，后续可被 `webhtv` 等 Android 项目复用。
+重点是把 JavaScript/TypeScript 运行时、npm 依赖安装和文件存储桥接能力集成到 Android 项目。
 
 ## 项目定位
 
@@ -75,7 +75,9 @@ unsigned release APK。未提供生产 keystore 时，
 Action 上传 AAR、APK、各 ABI `.so` 和 `SHA256SUMS`，详细步骤见
 [BUILDING.md](BUILDING.md#10-github-actions)。
 
-桌面 `ant` CLI 仍可选构建，但不是 FAnt Android 移植的必需产物：
+Android runtime 支持 `arm64-v8a`、`x86_64` 和 `armeabi-v7a`；其中 32 位 ARM
+使用解释器模式，不启用 Silver MIR JIT。桌面 `ant` CLI 仍可选构建，但不是 FAnt
+Android 移植的必需产物：
 
 ```bash
 ./scripts/build-ant.sh --build-dir build

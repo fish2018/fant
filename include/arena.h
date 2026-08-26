@@ -27,14 +27,22 @@ typedef struct {
   void *free_list;
 } ant_fixed_arena_t;
 
+#if UINTPTR_MAX <= UINT32_MAX
+// A 32-bit Android process cannot reserve multi-gigabyte arenas, and the
+// 64-bit defaults are not representable in size_t. Keep enough headroom for
+// normal workloads without wrapping the reservation size.
+static constexpr size_t ANT_ARENA_MAX         = 512ULL * 1024 * 1024;
+static constexpr size_t ANT_CLOSURE_ARENA_MAX = 128ULL * 1024 * 1024;
+#else
 static constexpr size_t ANT_ARENA_MAX         = 64ULL * 1024 * 1024 * 1024;
 static constexpr size_t ANT_CLOSURE_ARENA_MAX = 2ULL * 1024 * 1024 * 1024;
+#endif
 static constexpr size_t ARENA_GROW_INCREMENT  = 8ULL * 1024 * 1024;
 
 // the kernel can hand out mmap addresses above the 47-bit NaN-boxing ceiling.
 // ant_mmap_low() probes the low VA range with MAP_FIXED_NOREPLACE
 // before falling back to an unpinned mmap. only needed on Linux
-#ifdef __linux__
+#if defined(__linux__) && UINTPTR_MAX > UINT32_MAX
 
 #ifndef MAP_FIXED_NOREPLACE
 #define MAP_FIXED_NOREPLACE 0x100000
@@ -118,7 +126,7 @@ static inline int ant_arena_decommit(void *base, size_t old_size, size_t new_siz
 #else
 
 static inline void *ant_arena_reserve(size_t max_size) {
-#ifdef __linux__
+#if defined(__linux__) && UINTPTR_MAX > UINT32_MAX
   void *p = ant_mmap_low(max_size, PROT_NONE, 0);
 #else
   void *p = mmap(NULL, max_size, PROT_NONE, MAP_PRIVATE | MAP_ANON, -1, 0);
@@ -152,7 +160,7 @@ static inline void ant_arena_free(void *base, size_t reserved_size) {
 }
 
 static inline void *ant_os_alloc(size_t size) {
-#ifdef __linux__
+#if defined(__linux__) && UINTPTR_MAX > UINT32_MAX
   void *p = ant_mmap_low(size, PROT_READ | PROT_WRITE, 0);
 #else
   void *p = mmap(NULL, size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0);

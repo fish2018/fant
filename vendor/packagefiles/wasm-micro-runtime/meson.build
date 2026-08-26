@@ -14,7 +14,7 @@ endif
 
 # Android's 32-bit ARM ABI is not guaranteed to provide NEON. Keep the
 # interpreter portable there; arm64 and x86_64 retain SIMD support.
-wamr_enable_simd = host_machine.cpu_family() != 'arm'
+wamr_enable_simd = not ['arm', 'armv7-a'].contains(host_machine.cpu_family())
 wamr_simd_define = wamr_enable_simd ? '1' : '0'
 wamr_simde_define = wamr_enable_simd ? '1' : '0'
 wamr_simde_deps = []
@@ -69,7 +69,7 @@ endif
 
 if host_machine.cpu_family() == 'aarch64'
   common_c_args += ['-DBUILD_TARGET_AARCH64', '-DBUILD_TARGET=AARCH64']
-elif host_machine.cpu_family() == 'arm'
+elif ['arm', 'armv7-a'].contains(host_machine.cpu_family())
   common_c_args += ['-DBUILD_TARGET_ARM', '-DBUILD_TARGET=ARM']
 elif host_machine.cpu_family() == 'x86_64'
   common_c_args += ['-DBUILD_TARGET_X86_64', '-DBUILD_TARGET=X86_64']
@@ -169,7 +169,7 @@ if wamr_platform == 'darwin'
   wamr_sources += files('core/iwasm/common/arch/invokeNative_darwin.S')
 elif host_machine.cpu_family() == 'aarch64'
   wamr_sources += files(wamr_enable_simd ? 'core/iwasm/common/arch/invokeNative_aarch64_simd.s' : 'core/iwasm/common/arch/invokeNative_aarch64.s')
-elif host_machine.cpu_family() == 'arm'
+elif ['arm', 'armv7-a'].contains(host_machine.cpu_family())
   wamr_sources += files('core/iwasm/common/arch/invokeNative_arm.s')
 elif host_machine.cpu_family() == 'x86_64'
   if wamr_platform == 'windows'

@@ -15,7 +15,7 @@
 | --- | --- | --- |
 | Android `arm64-v8a` | 主要目标 | 手机和电视真机 |
 | Android `x86_64` | 支持 | 模拟器、部分 x86 设备 |
-| Android `armeabi-v7a` | 不支持 | 当前 runtime 依赖 64 位指针布局 |
+| Android `armeabi-v7a` | 支持 | 解释器模式；MIR JIT 在 32 位 ARM 上关闭 |
 | Android minSdk | 24 | AAR 的最低 API |
 | Android Demo compileSdk | 37 | 需要安装对应 SDK Platform |
 | Linux/macOS/Windows CLI | 可选 | 继承上游能力，不是 Android 集成必需项 |
@@ -135,14 +135,14 @@ android/demo/app/build/outputs/apk/debug/app-debug.apk
 
 脚本会在结束时打印两个文件的精确字节数。
 
-### 构建双 ABI
+### 构建多 ABI
 
-需要同时支持真机和 x86_64 模拟器时显式指定两个 ABI。双 ABI 会把两份约 9 MB
+需要同时支持多种真机和模拟器时显式指定 ABI。每个 ABI 会把一份约 9 MB
 的 native runtime 打进 APK，因此产物接近 19 MB：
 
 ```bash
 ./android/build-demo.sh \
-  --abis arm64-v8a,x86_64 \
+  --abis arm64-v8a,x86_64,armeabi-v7a \
   --min-sdk 24
 ```
 
@@ -278,6 +278,7 @@ unzip -l android/build/ant-runtime.aar | grep libant_android.so
 ```text
 jni/arm64-v8a/libant_android.so
 jni/x86_64/libant_android.so
+jni/armeabi-v7a/libant_android.so
 ```
 
 检查 APK：
@@ -377,9 +378,12 @@ export ANT_ZIG_BIN="/absolute/path/to/zig"
 
 安装 Clang 18+ 或 GCC 14+ 并显式设置 `CC`/`CXX`。Apple Clang 15 不满足当前要求。
 
-### `armeabi-v7a` 被拒绝
+### `armeabi-v7a` 构建说明
 
-这是预期行为。当前 FAnt runtime 的值表示和 VM 布局依赖 64 位指针，只支持 `arm64-v8a` 和 `x86_64`。
+`armeabi-v7a` 保留 64 位 NaN-box 值表示，但 native 指针仍是 32 位。为避免把
+指针或原型身份压进 64 位 IC 辅助字段，32 位构建使用独立的缓存字段；Silver MIR
+JIT 在该 ABI 上关闭并使用解释器。依赖 `.node` 原生扩展时仍需确认包是否提供
+对应的 32 位 ARM 构建。
 
 ### npm 包安装成功但无法运行
 

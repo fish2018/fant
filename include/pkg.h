@@ -19,6 +19,7 @@ typedef enum {
   PKG_INVALID_ARGUMENT = -8,
   PKG_NOT_FOUND = -9,
   PKG_INTEGRITY_MISMATCH = -10,
+  PKG_CANCELLED = -11,
 } pkg_error_t;
 
 typedef enum {
@@ -44,6 +45,9 @@ typedef void (*pkg_progress_cb)(
   const char *message
 );
 
+/* May be called from the package-manager thread at any cancellation point. */
+typedef bool (*pkg_cancel_cb)(void *user_data);
+
 typedef ant_storage_kind_t pkg_storage_kind_t;
 typedef ant_storage_location_t pkg_storage_location_t;
 typedef ant_storage_bridge_t pkg_storage_bridge_t;
@@ -59,6 +63,8 @@ typedef struct {
    * SAF_TREE and may also be used for FILE_PATH installations. */
   const ant_storage_context_t *project_storage;
   const ant_storage_context_t *cache_storage;
+  /* True when cache_storage is the project-owned .ant/pkg-cache child. */
+  bool cache_is_project_storage;
   const char *registry_url;
   /* 0 selects the default (6); values above 6 are currently capped at 6. */
   uint32_t max_connections;
@@ -69,6 +75,8 @@ typedef struct {
   /* Dependency download/extraction/linking remain enabled on Android.
    * Lifecycle scripts are opt-in because they execute package code. */
   bool run_lifecycle_scripts;
+  pkg_cancel_cb cancel_callback;
+  void *cancel_user_data;
 } pkg_options_t;
 
 typedef struct pkg_context pkg_context_t;

@@ -6,6 +6,7 @@
 #include <inttypes.h>
 #include <limits.h>
 #include <stdbool.h>
+#include <stdatomic.h>
 #include <stdint.h>
 #include <pthread.h>
 #include <stdio.h>
@@ -29,6 +30,23 @@
 #include "silver/vm.h"
 #include "storage_bridge.h"
 
+/* tlsuv is statically linked into libpkg. Route its connector/TLS diagnostics
+ * to logcat; stderr is not reliably visible from an OEM Android app. */
+typedef void (*ant_tlsuv_log_fn)(int level, const char *file, unsigned int line,
+  const char *message);
+extern void tlsuv_set_debug(int level, ant_tlsuv_log_fn output);
+
+static void ant_tlsuv_log(int level, const char *file, unsigned int line,
+  const char *message) {
+  (void)file;
+  (void)line;
+  int priority = level <= 1 ? ANDROID_LOG_ERROR
+    : level == 2 ? ANDROID_LOG_WARN
+    : level == 3 ? ANDROID_LOG_INFO
+    : ANDROID_LOG_DEBUG;
+  __android_log_print(priority, "FAntTLS", "%s", message ? message : "");
+}
+
 void ant_bootstrap_modules(ant_t *js);
 
 typedef struct {
@@ -42,6 +60,7 @@ typedef struct {
   jobject android_context;
   ant_android_storage_bridge_t *project_bridge;
   ant_android_storage_bridge_t *cache_bridge;
+  atomic_bool install_cancel_requested;
 } ant_android_runtime_t;
 
 typedef enum {
@@ -59,6 +78,53 @@ typedef struct {
   /* The complete callback table is intentionally opaque to the generic
    * runtime until the Android bridge is installed by the host. */
 } runtime_storage_bridge_t;
+
+typedef struct {
+  JavaVM *vm;
+  jobject listener;
+  jmethodID on_progress;
+} runtime_pkg_progress_t;
+
+static void runtime_pkg_progress(
+  void *user_data, pkg_phase_t phase, uint32_t current, uint32_t total,
+  const char *message
+) {
+  runtime_pkg_progress_t *progress = user_data;
+  if (!progress || !progress->vm || !progress->listener || !progress->on_progress) return;
+
+  JNIEnv *env = NULL;
+  bool detach = false;
+  jint state = (*progress->vm)->GetEnv(
+    progress->vm, (void **)&env, JNI_VERSION_1_6
+  );
+  if (state == JNI_EDETACHED) {
+    if ((*progress->vm)->AttachCurrentThread(progress->vm, &env, NULL) != JNI_OK) return;
+    detach = true;
+  } else if (state != JNI_OK || !env) {
+    return;
+  }
+
+  jstring text = (*env)->NewStringUTF(env, message ? message : "");
+  if (text) {
+    (*env)->CallVoidMethod(
+      env, progress->listener, progress->on_progress,
+      (jint)phase, (jint)current, (jint)total, text
+    );
+    (*env)->DeleteLocalRef(env, text);
+  }
+  if ((*env)->ExceptionCheck(env)) {
+    __android_log_print(ANDROID_LOG_WARN, "FAntPkg", "Progress listener threw an exception");
+    (*env)->ExceptionClear(env);
+  }
+  if (detach) (*progress->vm)->DetachCurrentThread(progress->vm);
+}
+
+static bool runtime_pkg_cancel(void *user_data) {
+  ant_android_runtime_t *runtime = user_data;
+  return runtime && atomic_load_explicit(
+    &runtime->install_cancel_requested, memory_order_acquire
+  );
+}
 
 /* Ant's module registry and several asynchronous module states are process
  * global. Keep the embedding contract explicit until those states become
@@ -552,6 +618,9 @@ JNIEXPORT jlong JNICALL
 Java_org_antjs_runtime_AntRuntime_nativeCreate(JNIEnv *env, jclass clazz, jobject context) {
   (void)clazz;
 
+  /* Enable connector/TLS diagnostics for the Android embedding. */
+  tlsuv_set_debug(3, ant_tlsuv_log);
+
   pthread_mutex_lock(&runtime_registry_mutex);
   if (runtime_created_once) {
     pthread_mutex_unlock(&runtime_registry_mutex);
@@ -567,6 +636,7 @@ Java_org_antjs_runtime_AntRuntime_nativeCreate(JNIEnv *env, jclass clazz, jobjec
     pthread_mutex_unlock(&runtime_registry_mutex);
     return 0;
   }
+  atomic_init(&runtime->install_cancel_requested, false);
 
   if (pthread_mutex_init(&runtime->mutex, NULL) != 0) {
     free(runtime);
@@ -871,7 +941,7 @@ Java_org_antjs_runtime_AntRuntime_nativeInstall(
   JNIEnv *env, jclass clazz, jlong handle, jint project_kind,
   jstring project_directory, jobjectArray package_specs, jstring registry_url,
   jstring cache_directory, jint cache_kind, jint max_connections, jboolean verbose, jboolean force,
-  jboolean run_lifecycle_scripts
+  jboolean run_lifecycle_scripts, jobject progress_listener
 ) {
   (void)clazz;
   ant_android_runtime_t *runtime = runtime_from_handle(handle);
@@ -884,6 +954,9 @@ Java_org_antjs_runtime_AntRuntime_nativeInstall(
     throw_runtime_exception(env, "maxConnections must be between 1 and 6");
     return NULL;
   }
+  atomic_store_explicit(
+    &runtime->install_cancel_requested, false, memory_order_release
+  );
   if (project_kind != 0 && project_kind != 1) {
     throw_runtime_exception(env, "project storage kind is invalid");
     return NULL;
@@ -937,6 +1010,22 @@ Java_org_antjs_runtime_AntRuntime_nativeInstall(
   const char *package_json = "package.json";
   const char *lockfile = "ant.lockb";
   const char *node_modules = "node_modules";
+  runtime_pkg_progress_t progress = {
+    .vm = runtime->vm,
+    .listener = NULL,
+    .on_progress = NULL,
+  };
+
+  if (progress_listener) {
+    progress.listener = (*env)->NewGlobalRef(env, progress_listener);
+    jclass listener_class = (*env)->GetObjectClass(env, progress_listener);
+    if (!progress.listener || !listener_class) goto install_cleanup;
+    progress.on_progress = (*env)->GetMethodID(
+      env, listener_class, "onProgress", "(IIILjava/lang/String;)V"
+    );
+    (*env)->DeleteLocalRef(env, listener_class);
+    if (!progress.on_progress) goto install_cleanup;
+  }
 
   if (cache_directory) {
     requested_cache = runtime_copy_java_cstring(env, cache_directory, "cacheDirectory");
@@ -950,6 +1039,7 @@ Java_org_antjs_runtime_AntRuntime_nativeInstall(
   }
 
   if (project_kind == 1) {
+    __android_log_print(ANDROID_LOG_INFO, "FAntPkg", "SAF: creating project bridge");
     if (!runtime->android_context) {
       throw_runtime_exception(env, "SAF_TREE requires an Android Context");
       goto install_cleanup;
@@ -958,6 +1048,7 @@ Java_org_antjs_runtime_AntRuntime_nativeInstall(
       env, runtime->android_context, project
     );
     if (!project_bridge) goto install_cleanup;
+    __android_log_print(ANDROID_LOG_INFO, "FAntPkg", "SAF: project bridge ready");
   }
   project_storage = ant_storage_context_create(
     (ant_storage_location_t){
@@ -970,6 +1061,7 @@ Java_org_antjs_runtime_AntRuntime_nativeInstall(
     throw_runtime_exception(env, "Unable to create project Storage context");
     goto install_cleanup;
   }
+  __android_log_print(ANDROID_LOG_INFO, "FAntPkg", "storage: project context ready kind=%d", project_kind);
 
   if (requested_cache) {
     if (cache_kind == 1) {
@@ -1003,6 +1095,7 @@ Java_org_antjs_runtime_AntRuntime_nativeInstall(
     }
     cache_bridge_is_project = true;
   }
+  __android_log_print(ANDROID_LOG_INFO, "FAntPkg", "storage: cache context ready kind=%d", cache_kind);
 
   if (ant_storage_mkdirs(project_storage, "") != ANT_STORAGE_OK ||
       ant_storage_mkdirs(project_storage, node_modules) != ANT_STORAGE_OK ||
@@ -1010,6 +1103,7 @@ Java_org_antjs_runtime_AntRuntime_nativeInstall(
     throw_runtime_exception(env, "Selected storage location is not writable");
     goto install_cleanup;
   }
+  __android_log_print(ANDROID_LOG_INFO, "FAntPkg", "storage: directories ready");
   {
     uint8_t *package_data = NULL;
     size_t package_size = 0;
@@ -1046,16 +1140,20 @@ Java_org_antjs_runtime_AntRuntime_nativeInstall(
       : NULL,
     .project_storage = project_storage,
     .cache_storage = cache_storage,
+    .cache_is_project_storage = cache_bridge_is_project,
     .registry_url = registry,
     .max_connections = (uint32_t)max_connections,
-    .progress_callback = NULL,
-    .user_data = NULL,
+    .progress_callback = progress.listener ? runtime_pkg_progress : NULL,
+    .user_data = progress.listener ? &progress : NULL,
     .verbose = verbose == JNI_TRUE,
     .force = force == JNI_TRUE,
     .run_lifecycle_scripts = run_lifecycle_scripts == JNI_TRUE,
+    .cancel_callback = runtime_pkg_cancel,
+    .cancel_user_data = runtime,
   };
 
   pthread_mutex_lock(&runtime->mutex);
+  __android_log_print(ANDROID_LOG_INFO, "FAntPkg", "install: initializing package context");
   ctx = pkg_init(&options);
   error = ctx ? PKG_OK : PKG_CACHE_ERROR;
   if (ctx && specs.count > 0) {
@@ -1063,6 +1161,7 @@ Java_org_antjs_runtime_AntRuntime_nativeInstall(
       (const char *const *)specs.items, specs.count, false);
   }
   if (ctx && error == PKG_OK) {
+    __android_log_print(ANDROID_LOG_INFO, "FAntPkg", "install: resolving and installing");
     error = pkg_resolve_and_install(ctx, package_json, lockfile, node_modules);
   }
   if (ctx && error == PKG_OK) {
@@ -1073,6 +1172,8 @@ Java_org_antjs_runtime_AntRuntime_nativeInstall(
      * can escape the selected Storage backend. */
   }
   if (error != PKG_OK) {
+    __android_log_print(ANDROID_LOG_WARN, "FAntPkg", "install: failed error=%d cancelled=%d", (int)error,
+      atomic_load_explicit(&runtime->install_cancel_requested, memory_order_acquire));
     runtime_format_pkg_error(error_text, sizeof(error_text), "npm install", ctx, error);
   }
   if (ctx) {
@@ -1091,12 +1192,31 @@ install_cleanup:
   free(project);
   free(registry);
   free(requested_cache);
+  if (progress.listener) (*env)->DeleteGlobalRef(env, progress.listener);
   if ((*env)->ExceptionCheck(env)) return NULL;
   if (error != PKG_OK) {
     throw_runtime_exception(env, error_text);
     return NULL;
   }
   return runtime_install_result_json(env, &result, lifecycle_count);
+}
+
+JNIEXPORT void JNICALL
+Java_org_antjs_runtime_AntRuntime_nativeCancelInstall(
+  JNIEnv *env, jclass clazz, jlong handle
+) {
+  (void)env;
+  (void)clazz;
+  ant_android_runtime_t *runtime = runtime_from_handle(handle);
+  if (!runtime) return;
+  pthread_mutex_lock(&runtime_registry_mutex);
+  if (active_runtime == runtime) {
+    atomic_store_explicit(
+      &runtime->install_cancel_requested, true, memory_order_release
+    );
+    __android_log_print(ANDROID_LOG_INFO, "FAntPkg", "install: cancellation requested");
+  }
+  pthread_mutex_unlock(&runtime_registry_mutex);
 }
 
 JNIEXPORT void JNICALL

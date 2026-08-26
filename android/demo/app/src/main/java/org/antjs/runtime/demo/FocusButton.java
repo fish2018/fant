@@ -129,9 +129,11 @@ final class FocusButton extends Button {
         tabIndicator.setColor(selectedTab ? Color.rgb(27, 119, 184) : Color.rgb(164, 181, 198));
         tabIndicator.setStyle(Paint.Style.FILL);
         float height = dp(selectedTab ? 3 : 2);
-        float inset = 0;
-        canvas.drawRoundRect(inset, getHeight() - height, getWidth() - inset,
-                getHeight(), height / 2f, height / 2f, tabIndicator);
+        float width = Math.min(dp(72), Math.max(dp(32), getWidth() / 3f));
+        float inset = (getWidth() - width) / 2f;
+        float bottom = getHeight() - dp(3);
+        canvas.drawRoundRect(inset, bottom - height, inset + width,
+                bottom, height / 2f, height / 2f, tabIndicator);
     }
 
     @Override

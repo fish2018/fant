@@ -535,6 +535,7 @@ pub const StorageExtractor = struct {
   parser: TarParser,
   decompressor: *GzipDecompressor,
   current_file: ?[]const u8,
+  file_buffer: std.ArrayListUnmanaged(u8),
   pending_symlinks: std.ArrayListUnmanaged(PendingSymlink),
   files_extracted: u32,
   bytes_extracted: u64,
@@ -563,6 +564,7 @@ pub const StorageExtractor = struct {
       .parser = TarParser.init("package/"),
       .decompressor = decompressor,
       .current_file = null,
+      .file_buffer = .empty,
       .pending_symlinks = .empty,
       .files_extracted = 0,
       .bytes_extracted = 0,
@@ -574,6 +576,7 @@ pub const StorageExtractor = struct {
 
   pub fn deinit(self: *StorageExtractor) void {
     if (self.current_file) |path| self.allocator.free(path);
+    self.file_buffer.deinit(self.allocator);
     for (self.pending_symlinks.items) |item| {
       self.allocator.free(item.path);
       self.allocator.free(item.target);
@@ -605,7 +608,7 @@ pub const StorageExtractor = struct {
         .entry => |entry| try self.handleEntry(entry),
         .file_data => |chunk| try self.writeFileData(chunk),
         .end_of_archive => {
-          self.closeCurrentFile();
+          try self.closeCurrentFile();
           try self.materializePendingSymlinks();
           self.archive_finished = true;
           return;
@@ -633,23 +636,36 @@ pub const StorageExtractor = struct {
   }
 
   fn createFile(self: *StorageExtractor, relative: []const u8) !void {
-    self.closeCurrentFile();
+    try self.closeCurrentFile();
     const path = try self.fullPath(relative);
     errdefer self.allocator.free(path);
-    const info = storage.stat(self.context, path) catch null;
+    // The package cache entry is removed before extraction. Avoid a SAF stat
+    // round-trip for every tar member; write() already creates or truncates
+    // the target document atomically for both FILE_PATH and SAF_TREE.
     try storage.write(self.context, path, "", true);
     self.current_file = path;
-    if (info == null or !info.?.exists) self.files_extracted += 1;
+    self.files_extracted += 1;
   }
 
   fn writeFileData(self: *StorageExtractor, data: []const u8) !void {
-    const path = self.current_file orelse return;
+    _ = self.current_file orelse return;
     if (data.len == 0) return;
-    try storage.write(self.context, path, data, false);
+    try self.file_buffer.appendSlice(self.allocator, data);
+    // SAF providers often implement every write as a fresh document operation.
+    // Keep the bridge calls coarse without retaining an entire tarball in RAM.
+    if (self.file_buffer.items.len >= 128 * 1024) try self.flushFileBuffer();
     self.bytes_extracted += data.len;
   }
 
-  fn closeCurrentFile(self: *StorageExtractor) void {
+  fn flushFileBuffer(self: *StorageExtractor) !void {
+    const path = self.current_file orelse return;
+    if (self.file_buffer.items.len == 0) return;
+    try storage.write(self.context, path, self.file_buffer.items, false);
+    self.file_buffer.clearRetainingCapacity();
+  }
+
+  fn closeCurrentFile(self: *StorageExtractor) !void {
+    try self.flushFileBuffer();
     if (self.current_file) |path| self.allocator.free(path);
     self.current_file = null;
   }

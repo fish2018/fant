@@ -29,6 +29,7 @@ import android.view.WindowInsets;
 import android.widget.EditText;
 import android.widget.FrameLayout;
 import android.widget.LinearLayout;
+import android.widget.ProgressBar;
 import android.widget.ScrollView;
 import android.widget.TextView;
 
@@ -48,6 +49,7 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Comparator;
 import java.util.List;
+import java.util.Set;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
@@ -65,6 +67,8 @@ public final class MainActivity extends Activity implements AntBackendController
     private static final String PROJECT_LOCATION = "project-location";
     private static final String CACHE_KIND = "cache-kind";
     private static final String CACHE_LOCATION = "cache-location";
+    private static final String REGISTRY_URL = "registry-url";
+    private static final String DEFAULT_REGISTRY_URL = "https://registry.npmjs.org";
     private static final String LEGACY_TREE = "selected-tree";
     private static final String LEGACY_CACHE_TREE = "selected-cache-tree";
     private static final int REQUEST_PROJECT_TREE = 1001;
@@ -89,23 +93,27 @@ public final class MainActivity extends Activity implements AntBackendController
     private StorageLocation cacheLocation;
     private String serverSource = "";
     private String packageJsonSource = "";
+    private String registryUrl = DEFAULT_REGISTRY_URL;
     private String activeFile = "server.ts";
     private String selectedDependencyName;
     private int loadGeneration;
     private boolean workspaceReady;
     private boolean busy;
     private boolean serverRunning;
+    private boolean startRequested;
     private boolean requestStartAfterNotification;
     private boolean waitingForAllFilesSettings;
     private boolean waitingForLegacyStoragePermission;
 
     private TextView status;
+    private ProgressBar installProgress;
     private TextView endpoint;
     private TextView output;
     private ScrollView outputScroll;
     private TextView projectLabel;
     private TextView cacheLabel;
     private TextView locationDetails;
+    private TextView registryLabel;
     private LinearLayout dependencyList;
     private EditText codeEditor;
     private FocusButton runtimeTab;
@@ -127,9 +135,14 @@ public final class MainActivity extends Activity implements AntBackendController
     private FocusButton chooseCache;
     private FocusButton clearProject;
     private FocusButton clearCache;
+    private FocusButton pruneCache;
+    private FocusButton cleanCache;
     private FocusButton requestAllFiles;
     private FocusButton directoryBack;
     private FocusButton dependencyBack;
+    private FocusButton chooseRegistry;
+    private View projectTabIndicator;
+    private View runtimeTabIndicator;
     private View runtimePage;
     private View projectPage;
     private View projectMainPage;
@@ -143,6 +156,8 @@ public final class MainActivity extends Activity implements AntBackendController
         ioExecutor = Executors.newSingleThreadExecutor();
         backend = AntBackendController.shared(getApplicationContext());
         backend.setListener(this);
+        registryUrl = readRegistryUrl();
+        backend.setRegistryUrl(registryUrl);
         serverRunning = backend.isReady();
         configureSystemBars();
         loadLocations();
@@ -196,13 +211,19 @@ public final class MainActivity extends Activity implements AntBackendController
     private void loadLocations() {
         projectLocation = readStoredLocation(PROJECT_KIND, PROJECT_LOCATION, LEGACY_TREE);
         cacheLocation = readStoredLocation(CACHE_KIND, CACHE_LOCATION, LEGACY_CACHE_TREE);
-        if (!hasAllFilesAccess()) {
-            // A legacy demo install may have persisted its old private fallback.
-            // Do not silently keep using it: the user must choose SAF explicitly.
-            if (isAppPrivateFallback(projectLocation)) projectLocation = null;
-            if (isAppPrivateFallback(cacheLocation)) cacheLocation = null;
+        boolean changed = false;
+        if (projectLocation == null) {
+            projectLocation = defaultAppPrivateProject();
+            changed = true;
+        }
+        // A null cache location means the project-owned .ant/pkg-cache child.
+        // Legacy app-private cache selections are migrated to that child.
+        if (isAppPrivateFallback(cacheLocation)) {
+            cacheLocation = null;
+            changed = true;
         }
         applyPublicDefaultsIfNeeded();
+        if (changed && preferences != null) persistLocations();
         backend.setLocations(projectLocation, cacheLocation);
     }
 
@@ -233,6 +254,18 @@ public final class MainActivity extends Activity implements AntBackendController
                 PUBLIC_ROOT_NAME + "/cache"));
     }
 
+    private File appPrivateRoot() {
+        return new File(getNoBackupFilesDir(), "ant-api-demo");
+    }
+
+    private StorageLocation defaultAppPrivateProject() {
+        return StorageLocation.filePath(new File(appPrivateRoot(), "project"));
+    }
+
+    private StorageLocation defaultAppPrivateCache() {
+        return StorageLocation.filePath(new File(appPrivateRoot(), "cache"));
+    }
+
     private boolean isAppPrivateFallback(StorageLocation location) {
         if (location == null || !location.isFilePath()) return false;
         String path = location.value();
@@ -256,7 +289,9 @@ public final class MainActivity extends Activity implements AntBackendController
     }
 
     private void requestAllFilesAccessIfNeeded() {
-        if (hasAllFilesAccess()) return;
+        // The app-private project is usable immediately. Public storage is an
+        // explicit opt-in from Directory Settings and must not block startup.
+        if (hasAllFilesAccess() || Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) return;
         if (Build.VERSION.SDK_INT <= Build.VERSION_CODES.P) {
             if (checkSelfPermission(Manifest.permission.WRITE_EXTERNAL_STORAGE)
                     != PackageManager.PERMISSION_GRANTED) {
@@ -353,11 +388,27 @@ public final class MainActivity extends Activity implements AntBackendController
         LinearLayout tabs = new LinearLayout(this);
         tabs.setBackground(round(Color.WHITE, dp(6)));
         tabs.setClipToPadding(false);
-        runtimeTab = tab("运行");
         projectTab = tab("项目");
-        tabs.addView(runtimeTab, weightWithMargin(dp(4)));
-        tabs.addView(projectTab, weight());
+        runtimeTab = tab("运行");
+        projectTabIndicator = new View(this);
+        runtimeTabIndicator = new View(this);
+        tabs.addView(topTab(projectTab, projectTabIndicator), weightWithMargin(dp(4)));
+        tabs.addView(topTab(runtimeTab, runtimeTabIndicator), weight());
         root.addView(tabs, match());
+
+        status = label("", 12, MUTED);
+        status.setMaxLines(2);
+        status.setEllipsize(TextUtils.TruncateAt.END);
+        status.setPadding(dp(4), dp(7), dp(4), dp(3));
+        root.addView(status, match());
+        installProgress = new ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal);
+        installProgress.setIndeterminate(true);
+        installProgress.setVisibility(View.GONE);
+        LinearLayout.LayoutParams progressParams = match();
+        progressParams.height = dp(3);
+        progressParams.topMargin = dp(1);
+        progressParams.bottomMargin = dp(4);
+        root.addView(installProgress, progressParams);
 
         FrameLayout content = new FrameLayout(this);
         runtimePage = buildRuntimePage();
@@ -366,7 +417,8 @@ public final class MainActivity extends Activity implements AntBackendController
         content.addView(projectPage, frame());
         root.addView(content, new LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f));
-        showPage("runtime");
+        // The project editor is the primary surface; the runtime tab is an explicit action.
+        showPage("project");
         applySystemBarInsets(root);
         return root;
     }
@@ -469,13 +521,6 @@ public final class MainActivity extends Activity implements AntBackendController
         content.setOrientation(LinearLayout.VERTICAL);
         content.setPadding(0, dp(4), 0, dp(6));
 
-        LinearLayout fileTabs = new LinearLayout(this);
-        serverFileTab = tab("server.ts");
-        packageFileTab = tab("package.json");
-        fileTabs.addView(serverFileTab, weightWithMargin(dp(4)));
-        fileTabs.addView(packageFileTab, weight());
-        content.addView(fileTabs, match());
-
         codeEditor = new EditText(this);
         codeEditor.setTextColor(TEXT);
         codeEditor.setHintTextColor(MUTED);
@@ -489,12 +534,6 @@ public final class MainActivity extends Activity implements AntBackendController
         codeEditor.setHorizontallyScrolling(false);
         codeEditor.setPadding(dp(12), dp(12), dp(12), dp(12));
         codeEditor.setBackground(round(Color.WHITE, dp(8)));
-        ScrollView editorScroll = new ScrollView(this);
-        editorScroll.setFillViewport(true);
-        editorScroll.addView(codeEditor, new ScrollView.LayoutParams(
-                ScrollView.LayoutParams.MATCH_PARENT, ScrollView.LayoutParams.MATCH_PARENT));
-        content.addView(editorScroll, new LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f));
 
         LinearLayout actions = new LinearLayout(this);
         openDirectorySettings = action("目录设置", FocusButton.STYLE_SECONDARY);
@@ -506,6 +545,21 @@ public final class MainActivity extends Activity implements AntBackendController
         actions.addView(reset, weightWithMargin(dp(4)));
         actions.addView(save, weight());
         content.addView(actions, match());
+
+        LinearLayout fileTabs = new LinearLayout(this);
+        serverFileTab = tab("server.ts");
+        packageFileTab = tab("package.json");
+        fileTabs.addView(serverFileTab, weightWithMargin(dp(4)));
+        fileTabs.addView(packageFileTab, weight());
+        content.addView(fileTabs, match());
+
+        ScrollView editorScroll = new ScrollView(this);
+        editorScroll.setFillViewport(true);
+        editorScroll.addView(codeEditor, new ScrollView.LayoutParams(
+                ScrollView.LayoutParams.MATCH_PARENT, ScrollView.LayoutParams.MATCH_PARENT));
+        content.addView(editorScroll, new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f));
+
         return content;
     }
 
@@ -545,6 +599,13 @@ public final class MainActivity extends Activity implements AntBackendController
         clearCache = action("使用项目内缓存", FocusButton.STYLE_TEXT);
         content.addView(clearCache, alignEnd());
 
+        LinearLayout cacheActions = new LinearLayout(this);
+        pruneCache = action("清理未使用缓存", FocusButton.STYLE_SECONDARY);
+        cleanCache = action("清空当前缓存", FocusButton.STYLE_DANGER);
+        cacheActions.addView(pruneCache, weightWithMargin(dp(6)));
+        cacheActions.addView(cleanCache, weight());
+        content.addView(cacheActions, match());
+
         locationDetails = label("", 11, MUTED);
         locationDetails.setTypeface(Typeface.MONOSPACE);
         locationDetails.setPadding(dp(2), dp(15), dp(2), 0);
@@ -560,6 +621,18 @@ public final class MainActivity extends Activity implements AntBackendController
         LinearLayout content = pageContent();
         dependencyBack = action("返回项目", FocusButton.STYLE_TEXT);
         content.addView(subpageHeader("依赖管理", dependencyBack), match());
+        LinearLayout registryRow = new LinearLayout(this);
+        registryRow.setGravity(Gravity.CENTER_VERTICAL);
+        registryRow.setPadding(dp(10), dp(7), dp(10), dp(7));
+        registryRow.setBackground(round(Color.WHITE, dp(6)));
+        registryLabel = label("依赖源\n" + registryUrl, 12, TEXT);
+        registryLabel.setMaxLines(3);
+        registryLabel.setEllipsize(TextUtils.TruncateAt.MIDDLE);
+        chooseRegistry = action("更换源", FocusButton.STYLE_SECONDARY);
+        registryRow.addView(registryLabel, new LinearLayout.LayoutParams(0,
+                LinearLayout.LayoutParams.WRAP_CONTENT, 1f));
+        registryRow.addView(chooseRegistry, wrap());
+        content.addView(registryRow, match());
         LinearLayout dependencyHeader = new LinearLayout(this);
         dependencyHeader.setGravity(Gravity.CENTER_VERTICAL);
         dependencyHeader.setPadding(dp(10), 0, dp(10), 0);
@@ -601,6 +674,7 @@ public final class MainActivity extends Activity implements AntBackendController
         projectTab.setOnClickListener(view -> showPage("project"));
         start.setOnClickListener(view -> startBackend());
         stop.setOnClickListener(view -> {
+            startRequested = false;
             busy = true;
             updateControls();
             BackendService.stop(this);
@@ -617,13 +691,14 @@ public final class MainActivity extends Activity implements AntBackendController
         openDependencyManager.setOnClickListener(view -> showProjectSubpage("dependencies"));
         directoryBack.setOnClickListener(view -> showProjectSubpage("main"));
         dependencyBack.setOnClickListener(view -> showProjectSubpage("main"));
+        chooseRegistry.setOnClickListener(view -> openRegistryDialog());
         requestAllFiles.setOnClickListener(view -> openAllFilesAccessSettings());
         chooseProject.setOnClickListener(view -> openLocationPicker(REQUEST_PROJECT_TREE,
                 projectLocation));
         chooseCache.setOnClickListener(view -> openLocationPicker(REQUEST_CACHE_TREE,
                 cacheLocation));
         clearProject.setOnClickListener(view -> {
-            projectLocation = hasAllFilesAccess() ? defaultPublicProject() : null;
+            projectLocation = hasAllFilesAccess() ? defaultPublicProject() : defaultAppPrivateProject();
             persistLocations();
             loadProjectAsync();
         });
@@ -632,6 +707,8 @@ public final class MainActivity extends Activity implements AntBackendController
             persistLocations();
             updateLocationLabels();
         });
+        cleanCache.setOnClickListener(view -> confirmClearCache());
+        pruneCache.setOnClickListener(view -> confirmPruneCache());
         addDependency.setOnClickListener(view -> openDependencyDialog());
         removeDependency.setOnClickListener(view -> removeSelectedDependency());
     }
@@ -796,6 +873,7 @@ public final class MainActivity extends Activity implements AntBackendController
             setStatus("项目仍在加载，请稍候。");
             return;
         }
+        startRequested = true;
         saveProject(true, false);
     }
 
@@ -848,29 +926,139 @@ public final class MainActivity extends Activity implements AntBackendController
                 runOnUiThread(() -> {
                     if (generation != loadGeneration) return;
                     onLog("已保存 server.ts 和 package.json。");
-                    busy = false;
-                    updateControls();
                     if (startAfterSave) {
                         setStatus("正在启动 FAnt 后端…");
                         BackendService.startForProject(MainActivity.this,
                                 projectLocation, cacheLocation);
+                        updateControls();
                     } else if (installAfterSave) {
                         setStatus("正在安装依赖…");
                         backend.setLocations(projectLocation, cacheLocation);
+                        busy = true;
+                        updateControls();
                         backend.installDependencies(projectLocation);
                     } else {
+                        busy = false;
                         setStatus("项目文件已保存。");
+                        updateControls();
                     }
                 });
             } catch (Throwable error) {
                 runOnUiThread(() -> {
                     busy = false;
+                    if (startAfterSave) startRequested = false;
                     setStatus("保存失败：" + error.getMessage());
                     onLog("保存失败：" + error);
                     updateControls();
                 });
             }
         });
+    }
+
+    private String readRegistryUrl() {
+        String stored = preferences.getString(REGISTRY_URL, DEFAULT_REGISTRY_URL);
+        String normalized = normalizeRegistryUrl(stored);
+        return normalized == null ? DEFAULT_REGISTRY_URL : normalized;
+    }
+
+    private static String normalizeRegistryUrl(String value) {
+        if (value == null) return null;
+        String normalized = value.trim();
+        if (normalized.length() == 0 || normalized.indexOf('?') >= 0
+                || normalized.indexOf('#') >= 0) return null;
+        if (normalized.startsWith("http://")) return null;
+        if (!normalized.contains("://")) normalized = "https://" + normalized;
+        try {
+            URL parsed = new URL(normalized);
+            if (!"https".equalsIgnoreCase(parsed.getProtocol())
+                    || parsed.getHost() == null || parsed.getHost().length() == 0
+                    || parsed.getUserInfo() != null
+                    || (parsed.getPath() != null && parsed.getPath().length() > 1)) return null;
+        } catch (Exception error) {
+            return null;
+        }
+        while (normalized.endsWith("/") && normalized.length() > "https://".length()) {
+            normalized = normalized.substring(0, normalized.length() - 1);
+        }
+        return normalized;
+    }
+
+    private void setRegistryUrl(String value, boolean logChange) {
+        String normalized = normalizeRegistryUrl(value);
+        if (normalized == null) {
+            setStatus("依赖源必须是有效的 HTTPS 地址。\n例如：https://registry.example.com");
+            return;
+        }
+        registryUrl = normalized;
+        preferences.edit().putString(REGISTRY_URL, normalized).apply();
+        backend.setRegistryUrl(normalized);
+        if (registryLabel != null) registryLabel.setText("依赖源\n" + normalized);
+        if (logChange) onLog("已切换 npm 依赖源：" + normalized);
+        setStatus("依赖源已保存。下次搜索和安装依赖时生效。");
+    }
+
+    private void openRegistryDialog() {
+        final String[] names = {
+                "npm 官方源",
+                "npmmirror 镜像（国内）",
+                "CNPM 镜像（国内）",
+                "自定义 HTTPS 源"
+        };
+        final String[] urls = {
+                DEFAULT_REGISTRY_URL,
+                "https://registry.npmmirror.com",
+                "https://r.cnpmjs.org",
+                null
+        };
+        int checked = -1;
+        for (int i = 0; i < urls.length - 1; i++) {
+            if (urls[i].equals(registryUrl)) {
+                checked = i;
+                break;
+            }
+        }
+        new AlertDialog.Builder(this)
+                .setTitle("选择 npm 依赖源")
+                .setSingleChoiceItems(names, checked, (dialog, which) -> {
+                    if (which == urls.length - 1) {
+                        dialog.dismiss();
+                        openCustomRegistryDialog();
+                    } else {
+                        setRegistryUrl(urls[which], true);
+                        dialog.dismiss();
+                    }
+                })
+                .setNegativeButton("取消", null)
+                .show();
+    }
+
+    private void openCustomRegistryDialog() {
+        EditText input = new EditText(this);
+        input.setSingleLine(true);
+        input.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_URI);
+        input.setHint("https://registry.example.com");
+        input.setText(registryUrl);
+        input.setSelectAllOnFocus(true);
+        int horizontal = dp(22);
+        input.setPadding(horizontal, dp(4), horizontal, dp(4));
+        AlertDialog dialog = new AlertDialog.Builder(this)
+                .setTitle("自定义 HTTPS 源")
+                .setMessage("仅支持 HTTPS 主机地址，例如 registry.example.com。")
+                .setView(input)
+                .setNegativeButton("取消", null)
+                .setPositiveButton("保存", null)
+                .create();
+        dialog.setOnShowListener(ignored -> dialog.getButton(AlertDialog.BUTTON_POSITIVE)
+                .setOnClickListener(view -> {
+                    String normalized = normalizeRegistryUrl(input.getText().toString());
+                    if (normalized == null) {
+                        input.setError("请输入有效的 HTTPS 源地址");
+                        return;
+                    }
+                    dialog.dismiss();
+                    setRegistryUrl(normalized, true);
+                }));
+        dialog.show();
     }
 
     private boolean validPackageJson() {
@@ -1072,11 +1260,109 @@ public final class MainActivity extends Activity implements AntBackendController
             selectedDependencyName = null;
             packageJsonSource = root.toString(2) + "\n";
             displayFile("package.json");
-            onLog("已删除依赖 " + removed + "，保存后生效。");
+            onLog("已从 package.json 删除 " + removed + "，正在保存并清理项目中的旧依赖…");
             updateControls();
+            // Re-resolve the graph after saving. The portable installer prunes
+            // package directories that are no longer in the graph while
+            // retaining the shared package cache for other projects.
+            saveProject(false, true);
         } catch (Exception error) {
             setStatus("删除依赖失败：" + error.getMessage());
         }
+    }
+
+    private void confirmClearCache() {
+        if (!editable() || projectLocation == null) {
+            setStatus("请先停止服务并等待项目加载完成。");
+            return;
+        }
+        String display = cacheLocation == null
+                ? StorageFiles.display(projectLocation) + "\n.ant/pkg-cache"
+                : StorageFiles.display(cacheLocation);
+        new AlertDialog.Builder(this)
+                .setTitle("清空当前缓存")
+                .setMessage("将物理删除此缓存目录中的所有包、索引和元数据：\n\n"
+                        + display + "\n\n项目源码和 node_modules 不会被删除。")
+                .setNegativeButton("取消", null)
+                .setPositiveButton("清空", (dialog, which) -> clearCacheContents())
+                .show();
+    }
+
+    private void confirmPruneCache() {
+        if (!editable() || projectLocation == null) {
+            setStatus("请先停止服务并等待项目加载完成。");
+            return;
+        }
+        String warning = cacheLocation == null
+                ? "只保留当前项目 ant.lockb 引用的软件包。"
+                : "这是独立缓存目录；其他项目正在使用但当前项目未引用的软件包也会被删除。";
+        new AlertDialog.Builder(this)
+                .setTitle("清理未使用缓存")
+                .setMessage(warning + "\n\n缓存元数据会保留，项目源码和 node_modules 不会被删除。")
+                .setNegativeButton("取消", null)
+                .setPositiveButton("清理", (dialog, which) -> pruneCacheContents())
+                .show();
+    }
+
+    private void pruneCacheContents() {
+        if (projectLocation == null) return;
+        final StorageLocation project = projectLocation;
+        final StorageLocation selectedCache = cacheLocation;
+        final String relative = selectedCache == null ? ".ant/pkg-cache" : "";
+        final StorageLocation target = selectedCache == null ? project : selectedCache;
+        busy = true;
+        setStatus("正在扫描未使用缓存…");
+        updateControls();
+        ioExecutor.execute(() -> {
+            try {
+                Set<String> keep = StorageFiles.lockfileIntegrities(this, project);
+                int removed = StorageFiles.prunePackageCache(this, target, relative, keep);
+                runOnUiThread(() -> {
+                    busy = false;
+                    setStatus("缓存清理完成，物理删除软件包 " + removed + " 个。");
+                    onLog("已清理当前项目未使用的缓存包：" + removed + " 个。");
+                    updateControls();
+                });
+            } catch (Throwable error) {
+                runOnUiThread(() -> {
+                    busy = false;
+                    setStatus("清理缓存失败：" + error.getMessage());
+                    onLog("清理缓存失败：" + error);
+                    updateControls();
+                });
+            }
+        });
+    }
+
+    private void clearCacheContents() {
+        if (projectLocation == null) return;
+        final StorageLocation project = projectLocation;
+        final StorageLocation selectedCache = cacheLocation;
+        final String relative = selectedCache == null ? ".ant/pkg-cache" : "";
+        final StorageLocation target = selectedCache == null ? project : selectedCache;
+        busy = true;
+        setStatus("正在清空缓存…");
+        updateControls();
+        ioExecutor.execute(() -> {
+            try {
+                int removed = StorageFiles.clearContents(this, target, relative);
+                runOnUiThread(() -> {
+                    busy = false;
+                    setStatus("缓存已清空，删除目录项 " + removed + " 个。");
+                    onLog("已物理清空缓存：" + (selectedCache == null
+                            ? project.value() + "/.ant/pkg-cache" : selectedCache.value()));
+                    updateLocationLabels();
+                    updateControls();
+                });
+            } catch (Throwable error) {
+                runOnUiThread(() -> {
+                    busy = false;
+                    setStatus("清空缓存失败：" + error.getMessage());
+                    onLog("清空缓存失败：" + error);
+                    updateControls();
+                });
+            }
+        });
     }
 
     private void openDependencyDialog() {
@@ -1141,8 +1427,9 @@ public final class MainActivity extends Activity implements AntBackendController
             HttpURLConnection connection = null;
             try {
                 String encoded = URLEncoder.encode(query, "UTF-8");
+                String source = registryUrl;
                 connection = (HttpURLConnection) new URL(
-                        "https://registry.npmjs.org/-/v1/search?text=" + encoded + "&size=12")
+                        source + "/-/v1/search?text=" + encoded + "&size=12")
                         .openConnection();
                 connection.setConnectTimeout(8000);
                 connection.setReadTimeout(10000);
@@ -1293,8 +1580,32 @@ public final class MainActivity extends Activity implements AntBackendController
     }
 
     @Override
+    public void onInstallProgress(String message, int current, int total) {
+        if (Looper.myLooper() != Looper.getMainLooper()) {
+            runOnUiThread(() -> onInstallProgress(message, current, total));
+            return;
+        }
+        if (message == null) {
+            if (installProgress != null) installProgress.setVisibility(View.GONE);
+            return;
+        }
+        setStatus(message);
+        if (installProgress != null) {
+            if (total > 0) {
+                installProgress.setIndeterminate(false);
+                installProgress.setMax(total);
+                installProgress.setProgress(Math.min(total, Math.max(0, current)));
+            } else {
+                installProgress.setIndeterminate(true);
+            }
+            installProgress.setVisibility(View.VISIBLE);
+        }
+    }
+
+    @Override
     public void onReady(String baseUrl) {
         serverRunning = true;
+        startRequested = false;
         busy = false;
         endpoint.setText(baseUrl + "  ·  同一 Wi-Fi 可访问");
         setStatus("后端已启动");
@@ -1306,6 +1617,7 @@ public final class MainActivity extends Activity implements AntBackendController
     @Override
     public void onStopped() {
         serverRunning = false;
+        startRequested = false;
         busy = false;
         endpoint.setText("服务未启动");
         setStatus("服务已停止，可再次启动。");
@@ -1315,15 +1627,23 @@ public final class MainActivity extends Activity implements AntBackendController
     @Override
     public void onBackendError(String message) {
         serverRunning = false;
+        startRequested = false;
         busy = false;
         setStatus("后端中断：" + message);
         updateControls();
     }
 
     @Override
-    public void onInstallFinished(boolean success) {
+    public void onInstallFinished(boolean success, boolean cancelled) {
         busy = false;
-        setStatus(success ? "依赖安装完成。" : "依赖安装失败，请查看日志。");
+        long elapsed = backend == null ? 0L : backend.installElapsedMs();
+        String elapsedText = elapsed > 0L
+                ? "（耗时 " + (elapsed / 1000L < 60L ? (elapsed / 1000L) + " 秒"
+                        : (elapsed / 60000L) + " 分 " + ((elapsed / 1000L) % 60L) + " 秒") + "）" : "";
+        setStatus(cancelled ? "依赖安装已停止。"
+                : success ? "依赖安装完成" + elapsedText + "。"
+                        : "依赖安装失败" + elapsedText + "，请查看日志。");
+        if (installProgress != null) installProgress.setVisibility(View.GONE);
         updateControls();
     }
 
@@ -1345,6 +1665,10 @@ public final class MainActivity extends Activity implements AntBackendController
         projectPage.setVisibility(runtime ? View.GONE : View.VISIBLE);
         runtimeTab.setSelectedTab(runtime);
         projectTab.setSelectedTab(!runtime);
+        if (runtimeTabIndicator != null) runtimeTabIndicator.setVisibility(
+                runtime ? View.VISIBLE : View.INVISIBLE);
+        if (projectTabIndicator != null) projectTabIndicator.setVisibility(
+                runtime ? View.INVISIBLE : View.VISIBLE);
         if (runtime && outputScroll != null) outputScroll.post(() -> outputScroll.fullScroll(View.FOCUS_DOWN));
     }
 
@@ -1359,13 +1683,15 @@ public final class MainActivity extends Activity implements AntBackendController
     }
 
     private boolean editable() {
-        return workspaceReady && !busy && !serverRunning && !backend.isStartingOrReady();
+        return workspaceReady && !busy && !startRequested && !serverRunning
+                && !backend.isStartingOrReady();
     }
 
     private void updateControls() {
         boolean edit = editable();
         if (start != null) start.setEnabled(edit);
-        if (stop != null) stop.setEnabled(serverRunning || backend.isStartingOrReady()
+        if (stop != null) stop.setEnabled(startRequested || serverRunning
+                || backend.isStartingOrReady() || backend.isInstalling()
                 || BackendService.isKeepAliveRequested(this));
         if (health != null) health.setEnabled(serverRunning);
         if (format != null) format.setEnabled(serverRunning);
@@ -1375,6 +1701,13 @@ public final class MainActivity extends Activity implements AntBackendController
         if (reset != null) reset.setEnabled(edit);
         if (addDependency != null) addDependency.setEnabled(edit);
         if (removeDependency != null) removeDependency.setEnabled(edit && selectedDependencyName != null);
+        if (chooseRegistry != null) chooseRegistry.setEnabled(edit);
+        if (pruneCache != null) pruneCache.setEnabled(edit && projectLocation != null);
+        if (cleanCache != null) cleanCache.setEnabled(edit && projectLocation != null);
+        if (installProgress != null) {
+            installProgress.setVisibility(backend != null && backend.isInstalling()
+                    ? View.VISIBLE : View.GONE);
+        }
         if (requestAllFiles != null) {
             boolean supported = Build.VERSION.SDK_INT >= Build.VERSION_CODES.R
                     || Build.VERSION.SDK_INT <= Build.VERSION_CODES.P;
@@ -1388,6 +1721,18 @@ public final class MainActivity extends Activity implements AntBackendController
     private FocusButton tab(String text) {
         FocusButton button = action(text, FocusButton.STYLE_TAB);
         return button;
+    }
+
+    private LinearLayout topTab(FocusButton button, View indicator) {
+        LinearLayout cell = new LinearLayout(this);
+        cell.setOrientation(LinearLayout.VERTICAL);
+        cell.setGravity(Gravity.CENTER_HORIZONTAL);
+        cell.addView(button, new LinearLayout.LayoutParams(-1, dp(44)));
+        indicator.setBackground(round(BLUE, dp(2)));
+        LinearLayout.LayoutParams line = new LinearLayout.LayoutParams(dp(56), dp(3));
+        line.bottomMargin = dp(3);
+        cell.addView(indicator, line);
+        return cell;
     }
 
     private FocusButton action(String text, int style) {

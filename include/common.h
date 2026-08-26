@@ -152,6 +152,10 @@ static inline uintptr_t ant_pointer_value(const void *p) {
 }
 
 static inline void *mantissa_chk(void *p, const char *func) {
+#if UINTPTR_MAX <= UINT32_MAX
+  (void)func;
+  return p;
+#else
   if (!p || (ant_pointer_value(p) >> 47) == 0) goto ok;
 
   fprintf(
@@ -162,6 +166,7 @@ static inline void *mantissa_chk(void *p, const char *func) {
   
   abort();
   ok: return p;
+#endif
 }
 
 #define ant_calloc(size)       mantissa_chk(calloc(1, size),    "calloc")

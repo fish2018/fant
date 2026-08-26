@@ -115,7 +115,11 @@ pkg_sources = files(
 
 pkg_zig_dir = src_root / 'src' / 'pkg'
 pkg_build_dir = meson.current_build_dir()
-pkg_target = host_machine.cpu_family() + '-linux-android'
+pkg_target = (
+  ['arm', 'armv7-a'].contains(host_machine.cpu_family())
+  ? 'arm-linux-androideabi'
+  : host_machine.cpu_family() + '-linux-android'
+)
 pkg_android_api = get_option('android_api')
 android_sysroot = run_command('sh', '-c', 'printf %s "$ANDROID_SYSROOT"', check: true).stdout().strip()
 pkg_lib = custom_target(

@@ -17,7 +17,9 @@ FAnt 的 Android Java/C API 仍使用 `org.antjs.runtime`、`AntRuntime` 和
 - 在同一个长期存活的线程中通过 `pump()` 推进 Promise、定时器、网络和流；
 - 扫描依赖并标记 Node API、动态加载、原生扩展和生命周期脚本风险。
 
-当前只支持 64 位 Android ABI：`arm64-v8a` 和 `x86_64`。最低 API 为 24。
+当前支持 `arm64-v8a`、`x86_64` 和 `armeabi-v7a` Android ABI。最低 API 为 24。
+`armeabi-v7a` 保留 64 位 NaN-box 值格式，使用 32 位安全的 IC 元数据；Silver
+MIR JIT 在该 ABI 上关闭，运行时使用解释器。
 
 ## 构建前置条件
 
@@ -62,8 +64,8 @@ android/demo/app/build/outputs/apk/debug/app-debug.apk
 ```
 
 也可以传入 `--sdk`、`--ndk`、`--build-dir`、`--abis`、`--min-sdk`，使用
-`--release` 构建已签名 release APK。默认只构建 `arm64-v8a`，需要 x86_64 模拟器
-时显式传 `--abis arm64-v8a,x86_64`。Gradle 直接使用 signing config 生成最终
+`--release` 构建已签名 release APK。默认只构建 `arm64-v8a`，需要其他设备或模拟器
+ABI 时显式传 `--abis arm64-v8a,x86_64,armeabi-v7a`。Gradle 直接使用 signing config 生成最终
 APK，脚本不会保留 `app-release-unsigned.apk`，最后只做对齐和签名校验。输出为：
 
 ```text
@@ -264,8 +266,8 @@ Demo 用前台服务承载长期运行的 API，并在运行期间维护 `pump()
 
 当前已验证：
 
-- `arm64-v8a` 和 `x86_64` native 构建；
-- 双 ABI `ant-runtime.aar` 打包；
+- `arm64-v8a`、`x86_64` 和 `armeabi-v7a` native 构建；
+- 多 ABI `ant-runtime.aar` 打包；
 - Demo debug APK 和已签名 release APK 构建；
 - Java API、依赖检查器和脚本静态检查。
 

@@ -256,9 +256,12 @@ echo "==> Building Android demo APK ($VARIANT)"
   cd "$SCRIPT_DIR/demo"
   # Keep Gradle's wrapper and dependency cache beside the selected build
   # directory. This makes a fresh clone independent of a root-owned global
-  # ~/.gradle and keeps generated state out of the source tree.
+  # ~/.gradle and keeps generated state out of the source tree. Android's
+  # plugin also writes the debug keystore and other tool state below its user
+  # home, so isolate that directory for the same reason.
   GRADLE_USER_HOME="${GRADLE_USER_HOME:-$BUILD_ROOT/gradle-home}"
-  mkdir -p "$GRADLE_USER_HOME"
+  ANDROID_USER_HOME="${ANDROID_USER_HOME:-$BUILD_ROOT/android-home}"
+  mkdir -p "$GRADLE_USER_HOME" "$ANDROID_USER_HOME"
   if [[ "$VARIANT" == "release" ]]; then
     export ANT_DEMO_KEYSTORE="$SIGNING_KEYSTORE"
     export ANT_DEMO_KEY_ALIAS="$SIGNING_ALIAS"
@@ -276,6 +279,7 @@ echo "==> Building Android demo APK ($VARIANT)"
     GRADLE_ARGS+=("-PantRequireReleaseSigning=true")
   fi
   ANDROID_SDK_ROOT="$SDK_ROOT" ANDROID_HOME="$SDK_ROOT" \
+    ANDROID_USER_HOME="$ANDROID_USER_HOME" \
     GRADLE_USER_HOME="$GRADLE_USER_HOME" \
     ./gradlew "${GRADLE_ARGS[@]}"
 )

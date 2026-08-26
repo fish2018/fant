@@ -21,4 +21,18 @@ esac
 mkdir -p "$SCRIPT_DIR/vendor"
 rsync -a $RSYNC_OPTS --exclude='.git/' "$ROOT_DIR/vendor/" "$SCRIPT_DIR/vendor/"
 
+# Re-apply directory-based packagefile overlays after rsync. Do not use
+# `meson subprojects packagefiles --apply` here: for wrap-file subprojects it
+# re-extracts the patch archive without replaying diff_files, which can undo
+# Android fixes already present in the root vendor checkout (for example the
+# LMDB robust-mutex fallback). Directory overlays such as WAMR still need to
+# follow the checked-in packagefiles exactly.
+for overlay in "$SCRIPT_DIR/vendor/packagefiles"/*/; do
+  [[ -d "$overlay" ]] || continue
+  overlay_name="$(basename "$overlay")"
+  [[ "$overlay_name" == patches ]] && continue
+  [[ -d "$SCRIPT_DIR/vendor/$overlay_name" ]] || continue
+  rsync -a $RSYNC_OPTS "$overlay" "$SCRIPT_DIR/vendor/$overlay_name/"
+done
+
 mkdir -p "$BUILD_DIR"

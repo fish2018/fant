@@ -54,6 +54,7 @@ maid validate_changes
 ```bash
 ./android/build-demo.sh --min-sdk 24
 ./android/build-demo.sh --abis arm64-v8a,x86_64 --min-sdk 24
+./android/build-demo.sh --abis armeabi-v7a --min-sdk 24
 ```
 
 有设备时还应验证：

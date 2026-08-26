@@ -10,6 +10,7 @@
 - 添加、搜索、删除并安装 npm 依赖；
 - 检查依赖是否使用未支持 Node API 或原生 `.node` 扩展；
 - 分别选择项目目录和依赖缓存目录；
+- 在目录设置中清理当前项目未使用的缓存，或确认后清空当前缓存目录；
 - 直接使用公共存储绝对路径或 SAF `content://` tree URI；
 - 在一个前台服务线程中持续调用 `AntRuntime.pump()`；
 - 停止 HTTP 服务后再次点击“启动”；
@@ -60,8 +61,9 @@ Gradle 直接使用 signing config 输出最终签名 APK，脚本随后执行 `
 `apksigner verify`；不会生成或保留 `app-release-unsigned.apk`。如果没有提供生产
 keystore，会在 `android/build/fant-demo-release.keystore` 创建本地 Demo keystore
 （alias `fant-demo`，密码 `changeit`）。正式发布或覆盖升级必须通过
-`ANT_DEMO_KEYSTORE` 等环境变量使用长期 keystore。需要 x86_64 模拟器时显式传
-`--abis arm64-v8a,x86_64`，双 ABI APK 会约 19 MB。
+`ANT_DEMO_KEYSTORE` 等环境变量使用长期 keystore。需要 x86_64 模拟器或 32 位 ARM
+真机时显式传 `--abis arm64-v8a,x86_64,armeabi-v7a`；每增加一个 ABI，APK 会增加
+一份 native runtime。
 
 只构建真机 arm64：
 
@@ -141,6 +143,20 @@ Demo 持久化读写授权，并把 URI 作为 `StorageLocation.SAF_TREE` 直接
 
 SAF 不等同于普通路径，不提供完整 POSIX fd、符号链接、硬链接、`mmap`、
 `flock` 或文件系统 watch 语义。
+
+### 缓存清理
+
+删除依赖时，Demo 会物理删除项目 `node_modules` 中不再属于当前依赖图的包，
+但不会自动删除共享缓存。目录设置提供两个显式操作：
+
+- `清理未使用缓存`：读取当前项目的 `ant.lockb`，删除缓存中未被当前项目引用的
+  包，同时保留 registry 元数据；选择了共享缓存时，其他项目未引用的包也会被删除。
+- `清空当前缓存`：二次确认后删除当前缓存目录中的所有包、索引和元数据，但保留
+  缓存根目录以及项目源码和 `node_modules`。
+
+两项操作都支持 `FILE_PATH` 和 `SAF_TREE`。SAF 模式通过 Storage Bridge 逐项调用
+`DocumentsProvider` 删除，完成后会显示删除数量；撤销授权或 Provider 拒绝删除时会
+显示明确错误。
 
 ## 示例 HTTP API
 
@@ -246,7 +262,8 @@ npm 解析、下载、校验、解压、缓存、锁文件和 `node_modules` 写
 
 - 一个进程只能有一个 `AntRuntime`；
 - runtime API 必须在创建它的同一线程调用；
-- 当前只支持 `arm64-v8a` 和 `x86_64`；
+- 当前支持 `arm64-v8a`、`x86_64` 和 `armeabi-v7a`；32 位 ARM 使用解释器，
+  不启用 Silver MIR JIT；
 - TypeScript 只支持可擦除类型语法，不执行类型检查，也不支持必须转换代码的
   TypeScript 特性；
 - FAnt 不是完整 Node.js，使用未实现 API 的程序需要适配；

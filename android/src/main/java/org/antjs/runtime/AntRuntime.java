@@ -22,7 +22,7 @@ public final class AntRuntime implements AutoCloseable {
         System.loadLibrary("ant_android");
     }
 
-    private long handle;
+    private volatile long handle;
     private final Context applicationContext;
 
     public AntRuntime() {
@@ -137,8 +137,15 @@ public final class AntRuntime implements AutoCloseable {
                 options.maxConnections,
                 options.verbose,
                 options.force,
-                options.runLifecycleScripts);
+                options.runLifecycleScripts,
+                options.progressListener);
         return InstallResult.fromJson(json);
+    }
+
+    /** Requests cancellation of an in-flight dependency installation. */
+    public void cancelInstall() {
+        long current = handle;
+        if (current != 0) nativeCancelInstall(current);
     }
 
     /** Runs approved lifecycle scripts; an empty package list means all discovered packages. */
@@ -227,7 +234,9 @@ public final class AntRuntime implements AutoCloseable {
     private static native String nativeInstall(
             long handle, int projectKind, String projectLocation, String[] packageSpecs,
             String registryUrl, String cacheLocation, int cacheKind, int maxConnections,
-            boolean verbose, boolean force, boolean runLifecycleScripts);
+            boolean verbose, boolean force, boolean runLifecycleScripts,
+            InstallProgressListener progressListener);
+    private static native void nativeCancelInstall(long handle);
     private static native void nativeRunPostinstall(
             long handle, String projectDirectory, String[] packageNames);
 
@@ -244,6 +253,13 @@ public final class AntRuntime implements AutoCloseable {
         public boolean force;
         /** Code-executing package lifecycle hooks are opt-in on Android. */
         public boolean runLifecycleScripts;
+        /** Called from the installing thread as dependency work advances. */
+        public InstallProgressListener progressListener;
+    }
+
+    @FunctionalInterface
+    public interface InstallProgressListener {
+        void onProgress(int phase, int current, int total, String message);
     }
 
     public static final class InstallResult {

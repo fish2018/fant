@@ -49,7 +49,7 @@ pub fn build(b: *std.Build) void {
       .cpu_model = .baseline,
     });
   };
-  if (resolved_target.result.abi == .android) {
+  if (resolved_target.result.abi.isAndroid()) {
     std.debug.print("[zig.build] android_api: {d}\n", .{
       resolved_target.result.os.version_range.linux.android,
     });
@@ -70,7 +70,7 @@ pub fn build(b: *std.Build) void {
       .link_libcpp = true,
       // Android embeds this archive in libant_android.so, so its TLS and
       // other relocations must be position-independent.
-      .pic = if (resolved_target.result.abi == .android) true else null,
+      .pic = if (resolved_target.result.abi.isAndroid()) true else null,
       .omit_frame_pointer = true,
       .unwind_tables = .none,
       .strip = true,
@@ -79,6 +79,10 @@ pub fn build(b: *std.Build) void {
 
   lib.use_llvm = true;
   if (!resolved_target.result.os.tag.isDarwin()) lib.use_lld = true;
+  // Static libraries do not bundle compiler-rt by default. Android embeds
+  // libpkg.a with CMake instead of Zig's linker, so keep the target runtime
+  // helpers in the archive (notably ARM32 soft-float and 128-bit routines).
+  if (resolved_target.result.abi.isAndroid()) lib.bundle_compiler_rt = true;
 
   lib.root_module.addCSourceFile(.{
     .file = b.path("metadata.c"),
@@ -96,13 +100,14 @@ pub fn build(b: *std.Build) void {
   lib.root_module.addOptions("config", options);
   lib.root_module.addCMacro("NDEBUG", "1");
   lib.root_module.addCMacro("YYJSON_DISABLE_UTILS", "1");
-  if (resolved_target.result.abi == .android) {
+  if (resolved_target.result.abi.isAndroid()) {
     if (b.graph.environ_map.get("ANDROID_SYSROOT")) |sysroot| {
       lib.root_module.addSystemIncludePath(.{
         .cwd_relative = b.pathJoin(&.{ sysroot, "usr/include" }),
       });
       const target_include = switch (resolved_target.result.cpu.arch) {
         .aarch64 => "aarch64-linux-android",
+        .arm => "arm-linux-androideabi",
         .x86_64 => "x86_64-linux-android",
         else => null,
       };

@@ -8,6 +8,14 @@ boringssl_opts.add_cmake_defines({
   'INSTALL_ENABLED': '0',
 })
 
+if host_machine.system() == 'android' and host_machine.cpu_family() == 'arm'
+  # CMake's Android toolchain expects the ARMv7 processor spelling even
+  # though Meson uses the canonical `arm` family name.
+  boringssl_opts.add_cmake_defines({
+    'CMAKE_SYSTEM_PROCESSOR': 'armv7-a',
+  })
+endif
+
 if host_machine.system() == 'darwin'
   deployment_flag = '-mmacosx-version-min=15.0'
   boringssl_opts.add_cmake_defines({
@@ -284,9 +292,13 @@ ant_runtime_deps = [
 ant_deps = allocator_deps + ant_core_deps + ant_format_deps + ant_runtime_deps + win_deps
 
 if get_option('jit')
+  if ['arm', 'armv7-a'].contains(host_machine.cpu_family())
+    warning('Silver MIR JIT is unavailable on 32-bit ARM; using interpreter')
+  else
   mir_dep = subproject('mir').get_variable('mir_dep')
   ant_deps += [mir_dep]
   add_project_arguments('-DANT_JIT', language: 'c')
+  endif
 endif
 
 if host_machine.system() == 'darwin'

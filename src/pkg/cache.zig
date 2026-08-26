@@ -43,7 +43,13 @@ pub const CacheDB = struct {
   allocator: std.mem.Allocator,
   portable: ?*portable_cache.PortableCache,
 
-  const MAP_SIZE: usize = 8 * 1024 * 1024 * 1024;
+  // LMDB reserves the full map in the process address space. Keep the larger
+  // desktop/64-bit map, but leave enough address space for the runtime, shared
+  // libraries, stacks, and package extraction buffers on 32-bit Android.
+  const MAP_SIZE: usize = if (@sizeOf(usize) == 4)
+    512 * 1024 * 1024
+  else
+    8 * 1024 * 1024 * 1024;
   const METADATA_TTL_SECS: i64 = 24 * 60 * 60;
 
   pub const Stats = struct {
@@ -424,9 +430,19 @@ pub const CacheDB = struct {
 
   pub fn delete(self: *CacheDB, integrity: *const [64]u8) !void {
     if (self.portable) |portable| return portable.delete(integrity);
+    var package_path: ?[]u8 = null;
+    if (self.lookup(integrity)) |entry| {
+      package_path = self.allocator.dupe(u8, entry.path) catch null;
+      var mutable = entry;
+      mutable.deinit();
+    }
     var txn: ?*c.MDB_txn = null;
-    const env = self.env orelse return error.DeleteError;
+    const env = self.env orelse {
+      if (package_path) |path| self.allocator.free(path);
+      return error.DeleteError;
+    };
     if (c.mdb_txn_begin(env, null, 0, &txn) != 0) {
+      if (package_path) |path| self.allocator.free(path);
       return error.DeleteError;
     } errdefer c.mdb_txn_abort(txn);
 
@@ -437,7 +453,40 @@ pub const CacheDB = struct {
     };
 
     _ = c.mdb_del(txn, self.dbi_primary, &key, null);
-    if (c.mdb_txn_commit(txn) != 0) return error.DeleteError;
+
+    // Remove all name/version aliases that reference this integrity.
+    var cursor: ?*c.MDB_cursor = null;
+    if (c.mdb_cursor_open(txn, self.dbi_secondary, &cursor) == 0) {
+      var stale = std.ArrayListUnmanaged([]u8).empty;
+      defer {
+        for (stale.items) |item| self.allocator.free(item);
+        stale.deinit(self.allocator);
+      }
+      var sec_key: c.MDB_val = undefined;
+      var sec_value: c.MDB_val = undefined;
+      var rc = c.mdb_cursor_get(cursor, &sec_key, &sec_value, c.MDB_FIRST);
+      while (rc == 0) : (rc = c.mdb_cursor_get(cursor, &sec_key, &sec_value, c.MDB_NEXT)) {
+        if (sec_value.mv_size == 64 and std.mem.eql(u8, @as([*]const u8, @ptrCast(sec_value.mv_data))[0..64], integrity)) {
+          const key_data: [*]const u8 = @ptrCast(sec_key.mv_data);
+          const copy = self.allocator.dupe(u8, key_data[0..sec_key.mv_size]) catch continue;
+          stale.append(self.allocator, copy) catch self.allocator.free(copy);
+        }
+      }
+      c.mdb_cursor_close(cursor);
+      for (stale.items) |item| {
+        var stale_key = c.MDB_val{ .mv_size = item.len, .mv_data = @ptrCast(item.ptr) };
+        _ = c.mdb_del(txn, self.dbi_secondary, &stale_key, null);
+      }
+    }
+
+    if (c.mdb_txn_commit(txn) != 0) {
+      if (package_path) |path| self.allocator.free(path);
+      return error.DeleteError;
+    }
+    if (package_path) |path| {
+      std.Io.Dir.cwd().deleteTree(io, path) catch {};
+      self.allocator.free(path);
+    }
   }
 
   pub fn getPackagePath(self: *CacheDB, integrity: *const [64]u8, allocator: std.mem.Allocator) ![]u8 {

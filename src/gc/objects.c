@@ -33,10 +33,11 @@
 #define ANT_HAS_ASAN 0
 #endif
 
-static inline bool gc_stack_word_readable(uintptr_t addr) {
+static inline bool gc_stack_word_readable(uintptr_t addr, size_t size) {
 #if ANT_HAS_ASAN
-  return __asan_region_is_poisoned((void *)addr, sizeof(uint64_t)) == NULL;
+  return __asan_region_is_poisoned((void *)addr, size) == NULL;
 #else
+  (void)size;
   return true;
 #endif
 }
@@ -48,8 +49,8 @@ static inline bool gc_get_stack_bounds(
   uintptr_t minp = (sp < base) ? sp : base;
   uintptr_t maxp = (sp < base) ? base : sp;
 
-  uintptr_t aligned_lo = (minp + sizeof(uint64_t) - 1u) & ~(sizeof(uint64_t) - 1u);
-  uintptr_t aligned_hi = maxp & ~(sizeof(uint64_t) - 1u);
+  uintptr_t aligned_lo = (minp + sizeof(uintptr_t) - 1u) & ~(sizeof(uintptr_t) - 1u);
+  uintptr_t aligned_hi = maxp & ~(sizeof(uintptr_t) - 1u);
 
   if (aligned_lo >= aligned_hi) return false;
   *lo = aligned_lo;
@@ -62,13 +63,21 @@ static gc_str_mark_fn g_str_mark = NULL;
 
 static uint32_t g_gc_func_mark_profile_depth = 0;
 static uint64_t g_gc_func_mark_profile_start_ns = 0;
+static uint64_t gc_epoch = 0;
+static uint8_t gc_obj_epoch = 0;
+static bool g_minor_gc = false;
 
 static void gc_mark_coroutine(ant_t *js, coroutine_t *c);
 static void gc_mark_closure(ant_t *js, sv_closure_t *c);
 
-static uint64_t gc_epoch = 0;
-static uint8_t gc_obj_epoch = 0;
-static bool g_minor_gc = false;
+static inline void gc_mark_raw_upvalue(ant_t *js, sv_upvalue_t *raw_uv) {
+  while (raw_uv && fixed_arena_contains(&js->upvalue_arena, raw_uv)) {
+    if (raw_uv->gc_epoch == gc_epoch) break;
+    raw_uv->gc_epoch = gc_epoch;
+    if (raw_uv->location == &raw_uv->closed) gc_mark_value(js, raw_uv->closed);
+    raw_uv = raw_uv->next;
+  }
+}
 
 static_assert(
   offsetof(sv_closure_t, call_flags) == 0,
@@ -661,11 +670,38 @@ static void gc_scan_activation(ant_t *js, sv_activation_t *act) {
 }
 
 static void gc_scan_range(ant_t *js, uintptr_t lo, uintptr_t hi) {
-  for (uintptr_t addr = lo; addr < hi; addr += sizeof(uint64_t)) {
-    if (!gc_stack_word_readable(addr)) continue;
+  const uintptr_t step = sizeof(uintptr_t);
+  for (uintptr_t addr = lo; addr < hi; addr += step) {
+    size_t remaining = (size_t)(hi - addr);
+    size_t read_size = remaining >= sizeof(uint64_t) ? sizeof(uint64_t) : step;
+    if (!gc_stack_word_readable(addr, read_size)) continue;
     uint64_t w;
-    memcpy(&w, (void *)addr, sizeof(w));
-    
+    memset(&w, 0, sizeof(w));
+    memcpy(&w, (void *)addr, read_size);
+
+#if UINTPTR_MAX <= UINT32_MAX
+    // ARM32 stack slots can contain native pointers in either half of an
+    // 8-byte NaN-box-aligned word. Scan both halves before interpreting the
+    // complete word as a JavaScript value.
+    uint32_t p0 = (uint32_t)w;
+    ant_object_t *obj0 = (ant_object_t *)(uintptr_t)p0;
+    if (fixed_arena_contains(&js->obj_arena, obj0)) gc_grey_obj(js, obj0);
+    sv_closure_t *closure0 = (sv_closure_t *)(uintptr_t)p0;
+    if (fixed_arena_contains(&js->closure_arena, closure0)) gc_mark_closure(js, closure0);
+    gc_mark_raw_upvalue(js, (sv_upvalue_t *)(uintptr_t)p0);
+    if (read_size == sizeof(uint64_t)) {
+      uint32_t p1 = (uint32_t)(w >> 32);
+      ant_object_t *obj1 = (ant_object_t *)(uintptr_t)p1;
+      if (fixed_arena_contains(&js->obj_arena, obj1)) gc_grey_obj(js, obj1);
+      sv_closure_t *closure1 = (sv_closure_t *)(uintptr_t)p1;
+      if (fixed_arena_contains(&js->closure_arena, closure1)) gc_mark_closure(js, closure1);
+      gc_mark_raw_upvalue(js, (sv_upvalue_t *)(uintptr_t)p1);
+    }
+#endif
+
+    // A trailing 32-bit stack slot has no complete NaN-box word to decode.
+    if (read_size < sizeof(uint64_t)) continue;
+
     ant_object_t *raw_obj = (ant_object_t *)(uintptr_t)w;
     if (fixed_arena_contains(&js->obj_arena, raw_obj))
       gc_grey_obj(js, raw_obj);
@@ -674,13 +710,7 @@ static void gc_scan_range(ant_t *js, uintptr_t lo, uintptr_t hi) {
     if (fixed_arena_contains(&js->closure_arena, raw_closure))
       gc_mark_closure(js, raw_closure);
 
-    sv_upvalue_t *raw_uv = (sv_upvalue_t *)(uintptr_t)w;
-    while (raw_uv && fixed_arena_contains(&js->upvalue_arena, raw_uv)) {
-      if (raw_uv->gc_epoch == gc_epoch) break;
-      raw_uv->gc_epoch = gc_epoch;
-      if (raw_uv->location == &raw_uv->closed) gc_mark_value(js, raw_uv->closed);
-      raw_uv = raw_uv->next;
-    }
+    gc_mark_raw_upvalue(js, (sv_upvalue_t *)(uintptr_t)w);
 
     if (w <= NANBOX_PREFIX) continue;
     uint8_t type = (w >> NANBOX_TYPE_SHIFT) & NANBOX_TYPE_MASK;
@@ -702,8 +732,12 @@ static void gc_scan_range(ant_t *js, uintptr_t lo, uintptr_t hi) {
 }
 
 void gc_mark_conservative_range(ant_t *js, const void *ptr, size_t size) {
-  if (!js || !ptr || size < sizeof(uint64_t)) return;
+  if (!js || !ptr || size < sizeof(uintptr_t)) return;
+#if UINTPTR_MAX <= UINT32_MAX
+  size_t bytes = size & ~(sizeof(uintptr_t) - 1u);
+#else
   size_t bytes = size & ~(sizeof(uint64_t) - 1u);
+#endif
   uintptr_t lo = (uintptr_t)ptr;
   if (lo > UINTPTR_MAX - bytes) return;
   gc_scan_range(js, lo, lo + bytes);
