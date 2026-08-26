@@ -84,7 +84,9 @@ alias 为 `fant-demo`，密码为 `changeit`。这只适合本地安装和测试
 
 仓库的 [Android AAR and Demo workflow](../.github/workflows/android-build.yml) 会在
 pull request、主分支推送和手动运行时构建并上传 AAR、APK、`.so` 与校验文件。
-`v*` tag 或手动 release 在配置 `FANT_RELEASE_KEYSTORE_BASE64`、
+`v*` tag 会默认构建并发布包含 `arm64-v8a` 和 `armeabi-v7a` 的多 ABI AAR；
+手动运行 release 时也必须在 ABI 输入中包含 `armeabi-v7a`。配置
+`FANT_RELEASE_KEYSTORE_BASE64`、
 `FANT_RELEASE_KEY_ALIAS`、`FANT_RELEASE_STORE_PASSWORD` 和
 `FANT_RELEASE_KEY_PASSWORD` 后使用长期签名；未配置时使用一次性的 Demo keystore，
 仍然直接生成已签名 APK，不会生成 unsigned APK。正式发布或覆盖升级必须配置长期密钥。

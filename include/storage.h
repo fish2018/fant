@@ -81,6 +81,14 @@ typedef struct ant_storage_bridge {
     const char *from_relative_path,
     const char *to_relative_path
   );
+  /* Copies a FILE_PATH source into this SAF tree. Implementations may use a
+   * provider-native document copy when the absolute source belongs to the
+   * selected tree; ANT_STORAGE_UNSUPPORTED requests the portable fallback. */
+  ant_storage_error_t (*copy_from_file_path)(
+    void *user_data,
+    const char *from_absolute_path,
+    const char *to_relative_path
+  );
   /* Replace `to_relative_path` with `from_relative_path`. Providers should
    * use their strongest same-tree primitive. When a provider cannot offer a
    * single atomic operation it must serialize the replacement so Ant never

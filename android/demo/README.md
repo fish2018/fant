@@ -47,7 +47,7 @@ adb install -r android/demo/app/build/outputs/apk/debug/app-debug.apk
 ```bash
 ./android/build-demo.sh \
   --release \
-  --abis arm64-v8a \
+  --abis arm64-v8a,armeabi-v7a \
   --min-sdk 24
 ```
 
@@ -116,18 +116,23 @@ node_modules/
 缓存目录独立保存依赖下载缓存，可以被多个项目共享。`node_modules` 必须位于
 项目目录中，不能设置成另一个任意目录，否则模块解析和锁文件语义会失去一致性。
 
-### 公共存储绝对路径
+### 默认私有路径
 
-Android 11 及以上首次启动时，Demo 会主动引导用户授予“所有文件访问权限”。
-授权后默认使用：
+首次启动时，Demo 默认使用 App 内部私有目录：
 
 ```text
-/storage/emulated/0/FAnt/project
-/storage/emulated/0/FAnt/cache
+/data/user/0/org.antjs.runtime.demo/no_backup/ant-api-demo/project
+/data/user/0/org.antjs.runtime.demo/no_backup/ant-api-demo/cache
 ```
 
-这种模式在 Java API 中是 `StorageLocation.FILE_PATH`，走真实文件系统。Demo
-不会在权限不足时静默切换到 App 私有目录。
+实际 `/data/user/0/...` 前缀由 Android 为当前用户和包分配。项目和缓存都是
+`StorageLocation.FILE_PATH`，走普通文件系统，适合 `node_modules` 的大量小文件。
+Demo 可以立即显示示例代码、安装依赖并启动服务。
+
+### 公共存储绝对路径
+
+用户可以在目录设置中申请“所有文件访问权限”，再明确选择公共存储绝对路径。
+该选择会被持久保留；仅授予权限不会自动把默认私有目录改成公共目录。
 
 ### SAF 目录
 

@@ -12,6 +12,9 @@ Owner: fish2018
 # 构建 Android AAR 和 Demo（默认 arm64，release 直接签名）
 ./android/build-demo.sh --min-sdk 24
 
+# tag/release 的多 ABI 产物（发布 AAR 包含 32 位 ARM）
+./android/build-demo.sh --abis arm64-v8a,armeabi-v7a --min-sdk 24 --release
+
 # 构建已配置的桌面树
 maid build
 

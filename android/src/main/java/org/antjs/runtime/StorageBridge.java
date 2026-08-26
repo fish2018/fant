@@ -5,6 +5,7 @@ import android.content.Context;
 import android.database.Cursor;
 import android.net.Uri;
 import android.os.ParcelFileDescriptor;
+import android.os.Environment;
 import android.provider.DocumentsContract;
 import android.provider.OpenableColumns;
 import android.util.Log;
@@ -12,6 +13,7 @@ import android.util.Log;
 import java.io.ByteArrayOutputStream;
 import java.io.FileInputStream;
 import java.io.FileOutputStream;
+import java.io.File;
 import java.io.IOException;
 import java.nio.channels.FileChannel;
 import java.util.ArrayList;
@@ -620,6 +622,88 @@ public final class StorageBridge {
         }
     }
 
+    /**
+     * Attempts a provider-native copy from an absolute shared-storage path.
+     * This is intentionally conservative: only the primary external-storage
+     * volume and paths below this selected tree are eligible. App-private and
+     * arbitrary filesystem paths return UNSUPPORTED so native code can use its
+     * portable fallback without weakening SAF path isolation.
+     */
+    public int copyFromFilePath(String absolutePath, String to) {
+        long started = traceStart("copyFromFilePath", absolutePath + " -> " + to);
+        try {
+            if (absolutePath == null || !absolutePath.startsWith("/")) return UNSUPPORTED;
+            File sourceFile = new File(absolutePath);
+            String primaryRoot = Environment.getExternalStorageDirectory().getCanonicalPath();
+            String source = sourceFile.getCanonicalPath();
+            String treeId = DocumentsContract.getTreeDocumentId(tree);
+            if (treeId == null || !treeId.startsWith("primary:")) return UNSUPPORTED;
+            String treeRelative = treeId.substring("primary:".length());
+            String treeRoot = primaryRoot + (treeRelative.length() == 0 ? "" : "/" + treeRelative);
+            if (!isSameOrChild(source, treeRoot)) return UNSUPPORTED;
+            String relativeSource = source.substring(treeRoot.length());
+            while (relativeSource.startsWith("/")) relativeSource = relativeSource.substring(1);
+            if (relativeSource.length() == 0) return UNSUPPORTED;
+            String[] targetParts = parts(to);
+            if (targetParts.length == 0) return INVALID_ARGUMENT;
+            StringBuilder parentPath = new StringBuilder();
+            for (int i = 0; i < targetParts.length - 1; i++) {
+                if (parentPath.length() > 0) parentPath.append('/');
+                parentPath.append(targetParts[i]);
+            }
+            Uri sourceUri = documentForRelativePath(relativeSource);
+            Uri targetParent = resolve(parentPath.toString(), true);
+            if (sourceUri == null || targetParent == null) return NOT_FOUND;
+            String sourceName = sourceFile.getName();
+            String targetName = targetParts[targetParts.length - 1];
+            Uri copied;
+            try {
+                copied = DocumentsContract.copyDocument(resolver, sourceUri, targetParent);
+            } catch (UnsupportedOperationException error) {
+                return UNSUPPORTED;
+            } catch (IllegalArgumentException error) {
+                return UNSUPPORTED;
+            }
+            if (copied == null) return UNSUPPORTED;
+            if (!targetName.equals(sourceName)) {
+                Uri renamed = DocumentsContract.renameDocument(resolver, copied, targetName);
+                if (renamed == null) {
+                    try { DocumentsContract.deleteDocument(resolver, copied); }
+                    catch (Exception ignored) { }
+                    return IO;
+                }
+                copied = renamed;
+            }
+            rememberChild(targetParent, targetName, copied);
+            resolvedUris.put(to, copied);
+            traceEnd("copyFromFilePath", absolutePath + " -> " + to, started,
+                    "OK provider source=" + sourceUri);
+            return OK;
+        } catch (SecurityException error) {
+            traceEnd("copyFromFilePath", absolutePath + " -> " + to, started, "PERMISSION");
+            return PERMISSION;
+        } catch (IOException error) {
+            traceEnd("copyFromFilePath", absolutePath + " -> " + to, started,
+                    "UNSUPPORTED:" + error.getMessage());
+            return UNSUPPORTED;
+        } catch (IllegalArgumentException error) {
+            traceEnd("copyFromFilePath", absolutePath + " -> " + to, started, "INVALID_ARGUMENT");
+            return INVALID_ARGUMENT;
+        }
+    }
+
+    private static boolean isSameOrChild(String path, String root) {
+        return path.equals(root) || (path.startsWith(root) && path.length() > root.length()
+                && path.charAt(root.length()) == '/');
+    }
+
+    private Uri documentForRelativePath(String relative) throws IOException {
+        String treeId = DocumentsContract.getTreeDocumentId(tree);
+        if (treeId == null || !treeId.startsWith("primary:")) return null;
+        String documentId = treeId + "/" + relative;
+        return DocumentsContract.buildDocumentUriUsingTree(tree, documentId);
+    }
+
     private String lockKey(String relative) {
         return tree.toString() + "\n" + (relative == null ? "" : relative);
     }
@@ -725,6 +809,13 @@ public final class StorageBridge {
 
     /** Probes the selected tree without modifying anything outside it. */
     public int probe() {
+        String probeKey = tree.toString();
+        synchronized (PROBE_MONITOR) {
+            if (PROBED_TREES.contains(probeKey)) {
+                Log.i(TAG, "probe cache hit tree=" + tree);
+                return OK;
+            }
+        }
         String prefix = ".ant-probe-" + Long.toUnsignedString(System.nanoTime());
         String file = prefix + "/probe.bin";
         String renamed = prefix + "/renamed.bin";
@@ -739,6 +830,11 @@ public final class StorageBridge {
             if (result != OK) {
                 result = copy(file, renamed);
                 if (result == OK) result = remove(file, true);
+            }
+            if (result == OK) {
+                synchronized (PROBE_MONITOR) {
+                    PROBED_TREES.add(probeKey);
+                }
             }
             return result;
         } catch (SecurityException error) {

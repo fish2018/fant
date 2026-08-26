@@ -76,8 +76,6 @@ public final class MainActivity extends Activity implements AntBackendController
     private static final int REQUEST_NOTIFICATIONS = 1003;
     private static final int REQUEST_LEGACY_STORAGE = 1004;
     private static final String ALL_FILES_PROMPTED = "all-files-prompted";
-    private static final String PUBLIC_ROOT_NAME = "FAnt";
-
     private static final int BG = Color.rgb(245, 247, 250);
     private static final int TEXT = Color.rgb(42, 52, 65);
     private static final int MUTED = Color.rgb(103, 116, 132);
@@ -183,7 +181,6 @@ public final class MainActivity extends Activity implements AntBackendController
         if (waitingForAllFilesSettings) {
             waitingForAllFilesSettings = false;
             if (hasAllFilesAccess()) {
-                applyPublicDefaultsIfNeeded();
                 onLog("已授予完全文件访问权限，可直接使用公共存储绝对路径。");
             } else if (projectLocation == null) {
                 setStatus("未授予完全文件访问权限，请选择 SAF 目录。");
@@ -216,13 +213,10 @@ public final class MainActivity extends Activity implements AntBackendController
             projectLocation = defaultAppPrivateProject();
             changed = true;
         }
-        // A null cache location means the project-owned .ant/pkg-cache child.
-        // Legacy app-private cache selections are migrated to that child.
-        if (isAppPrivateFallback(cacheLocation)) {
-            cacheLocation = null;
+        if (cacheLocation == null) {
+            cacheLocation = defaultAppPrivateCache();
             changed = true;
         }
-        applyPublicDefaultsIfNeeded();
         if (changed && preferences != null) persistLocations();
         backend.setLocations(projectLocation, cacheLocation);
     }
@@ -244,16 +238,6 @@ public final class MainActivity extends Activity implements AntBackendController
         return Environment.getExternalStorageDirectory();
     }
 
-    private StorageLocation defaultPublicProject() {
-        return StorageLocation.filePath(new File(publicStorageRoot(),
-                PUBLIC_ROOT_NAME + "/project"));
-    }
-
-    private StorageLocation defaultPublicCache() {
-        return StorageLocation.filePath(new File(publicStorageRoot(),
-                PUBLIC_ROOT_NAME + "/cache"));
-    }
-
     private File appPrivateRoot() {
         return new File(getNoBackupFilesDir(), "ant-api-demo");
     }
@@ -264,28 +248,6 @@ public final class MainActivity extends Activity implements AntBackendController
 
     private StorageLocation defaultAppPrivateCache() {
         return StorageLocation.filePath(new File(appPrivateRoot(), "cache"));
-    }
-
-    private boolean isAppPrivateFallback(StorageLocation location) {
-        if (location == null || !location.isFilePath()) return false;
-        String path = location.value();
-        String privateRoot = getNoBackupFilesDir().getAbsolutePath();
-        return path.equals(privateRoot + "/ant-api-demo")
-                || path.startsWith(privateRoot + "/ant-api-demo/");
-    }
-
-    private void applyPublicDefaultsIfNeeded() {
-        if (!hasAllFilesAccess()) return;
-        boolean changed = false;
-        if (projectLocation == null || isAppPrivateFallback(projectLocation)) {
-            projectLocation = defaultPublicProject();
-            changed = true;
-        }
-        if (cacheLocation == null || isAppPrivateFallback(cacheLocation)) {
-            cacheLocation = defaultPublicCache();
-            changed = true;
-        }
-        if (changed && preferences != null) persistLocations();
     }
 
     private void requestAllFilesAccessIfNeeded() {
@@ -596,7 +558,7 @@ public final class MainActivity extends Activity implements AntBackendController
                 LinearLayout.LayoutParams.WRAP_CONTENT, 1f));
         cacheRow.addView(chooseCache, wrap());
         content.addView(cacheRow, match());
-        clearCache = action("使用项目内缓存", FocusButton.STYLE_TEXT);
+        clearCache = action("使用默认缓存", FocusButton.STYLE_TEXT);
         content.addView(clearCache, alignEnd());
 
         LinearLayout cacheActions = new LinearLayout(this);
@@ -698,12 +660,12 @@ public final class MainActivity extends Activity implements AntBackendController
         chooseCache.setOnClickListener(view -> openLocationPicker(REQUEST_CACHE_TREE,
                 cacheLocation));
         clearProject.setOnClickListener(view -> {
-            projectLocation = hasAllFilesAccess() ? defaultPublicProject() : defaultAppPrivateProject();
+            projectLocation = defaultAppPrivateProject();
             persistLocations();
             loadProjectAsync();
         });
         clearCache.setOnClickListener(view -> {
-            cacheLocation = null;
+            cacheLocation = defaultAppPrivateCache();
             persistLocations();
             updateLocationLabels();
         });
@@ -883,9 +845,7 @@ public final class MainActivity extends Activity implements AntBackendController
         if (requestCode == REQUEST_LEGACY_STORAGE && waitingForLegacyStoragePermission) {
             waitingForLegacyStoragePermission = false;
             if (hasAllFilesAccess()) {
-                applyPublicDefaultsIfNeeded();
                 onLog("已授予公共存储访问权限，可使用 FILE_PATH。");
-                loadProjectAsync();
             } else {
                 setStatus("未授予公共存储权限，请选择 SAF 目录。");
             }
@@ -1210,7 +1170,7 @@ public final class MainActivity extends Activity implements AntBackendController
         if (projectLabel == null) return;
         projectLabel.setText("项目目录\n" + StorageFiles.display(projectLocation));
         cacheLabel.setText(cacheLocation == null
-                ? "依赖缓存目录\n项目目录/.ant/pkg-cache（项目内）"
+                ? "依赖缓存目录\n项目目录/.ant/pkg-cache"
                 : "依赖缓存目录\n" + StorageFiles.display(cacheLocation));
         String projectPath = projectLocation == null ? "未设置" : projectLocation.value();
         String nodeModules = projectLocation == null ? "未设置"

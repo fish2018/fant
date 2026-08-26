@@ -822,13 +822,15 @@ ant_storage_error_t ant_storage_copy_between(
   if (from_context == to_context)
     return ant_storage_copy(from_context, from, to);
 
-  /* A child SAF context and its project context share one DocumentsProvider
-   * bridge. Keep the operation inside that provider instead of recursively
+  /* SAF contexts rooted at the same URI may have different bridge objects
+   * (for example, when the user explicitly selects the same tree as both
+   * project and cache). They still address the same DocumentsProvider tree,
+   * so keep the operation inside that provider instead of recursively
    * reading and rewriting every file through JNI. The Android bridge can use
    * DocumentsContract.copyDocument() for this same-tree fast path. */
   if (from_context->location.kind == ANT_STORAGE_SAF_TREE &&
       to_context->location.kind == ANT_STORAGE_SAF_TREE &&
-      from_context->bridge && from_context->bridge == to_context->bridge &&
+      from_context->bridge && to_context->bridge &&
       strcmp(from_context->location.location, to_context->location.location) == 0) {
     char *from_rel = NULL, *from_file = NULL, *to_rel = NULL, *to_file = NULL;
     ant_storage_error_t same_tree = storage_prepare(from_context, from, &from_rel, &from_file);
@@ -841,6 +843,29 @@ ant_storage_error_t ant_storage_copy_between(
     }
     free(from_rel); free(from_file); free(to_rel); free(to_file);
     if (same_tree != ANT_STORAGE_UNSUPPORTED) return same_tree;
+  }
+
+  /* A separately configured absolute cache often points into the same shared
+   * external-storage tree as the SAF project. Let the destination bridge map
+   * that source to a DocumentsProvider URI and copy the complete directory in
+   * one provider operation. If the mapping is not safe or unsupported, keep
+   * the portable read/write fallback below. */
+  if (from_context->location.kind == ANT_STORAGE_FILE_PATH &&
+      to_context->location.kind == ANT_STORAGE_SAF_TREE &&
+      to_context->bridge && to_context->bridge->copy_from_file_path) {
+    char *from_rel = NULL, *from_file = NULL, *to_rel = NULL, *to_file = NULL;
+    ant_storage_error_t native_copy = storage_prepare(
+      from_context, from, &from_rel, &from_file
+    );
+    if (native_copy == ANT_STORAGE_OK)
+      native_copy = storage_prepare(to_context, to, &to_rel, &to_file);
+    if (native_copy == ANT_STORAGE_OK) {
+      native_copy = to_context->bridge->copy_from_file_path(
+        to_context->bridge->user_data, from_file, to_rel
+      );
+    }
+    free(from_rel); free(from_file); free(to_rel); free(to_file);
+    if (native_copy != ANT_STORAGE_UNSUPPORTED) return native_copy;
   }
 
   uint64_t size = 0;

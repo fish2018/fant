@@ -18,6 +18,7 @@ struct ant_android_storage_bridge {
   jmethodID remove;
   jmethodID rename;
   jmethodID copy;
+  jmethodID copy_from_file_path;
   jmethodID atomic_replace;
   jmethodID probe;
   jmethodID lock;
@@ -409,6 +410,13 @@ static ant_storage_error_t bridge_copy(
   return bridge_call_two_paths(bridge, bridge->copy, from, to);
 }
 
+static ant_storage_error_t bridge_copy_from_file_path(
+  void *data, const char *from, const char *to
+) {
+  ant_android_storage_bridge_t *bridge = data;
+  return bridge_call_two_paths(bridge, bridge->copy_from_file_path, from, to);
+}
+
 static ant_storage_error_t bridge_atomic_replace(
   void *data, const char *from, const char *to
 ) {
@@ -501,6 +509,7 @@ ant_android_storage_bridge_t *ant_android_storage_bridge_create(
   METHOD(remove, "remove", "(Ljava/lang/String;Z)I");
   METHOD(rename, "rename", "(Ljava/lang/String;Ljava/lang/String;)I");
   METHOD(copy, "copy", "(Ljava/lang/String;Ljava/lang/String;)I");
+  METHOD(copy_from_file_path, "copyFromFilePath", "(Ljava/lang/String;Ljava/lang/String;)I");
   METHOD(atomic_replace, "atomicReplace", "(Ljava/lang/String;Ljava/lang/String;)I");
   METHOD(probe, "probe", "()I");
   METHOD(lock, "lock", "(Ljava/lang/String;)J");
@@ -528,6 +537,7 @@ ant_android_storage_bridge_t *ant_android_storage_bridge_create(
     .remove = bridge_remove,
     .rename = bridge_rename,
     .copy = bridge_copy,
+    .copy_from_file_path = bridge_copy_from_file_path,
     .atomic_replace = bridge_atomic_replace,
     .lock = bridge_lock,
     .unlock = bridge_unlock,
