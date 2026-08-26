@@ -304,9 +304,10 @@ adb install -r android/demo/app/build/outputs/apk/debug/app-debug.apk
 
 - pull request、`main`/`master` 推送：构建 `arm64-v8a` debug；
 - 手动运行：可选择 `debug`/`release`、ABI 列表和 minSdk；
-- `v*` tag：默认构建并发布包含 `arm64-v8a` 和 `armeabi-v7a` 的已签名多 ABI
-  release；配置长期密钥时使用长期签名，否则使用一次性的 Demo keystore。CI
-  会检查 AAR 内的 `armeabi-v7a` 库确实为 ELF32/ARM；
+- `v*` tag：默认构建并发布分别包含 `arm64-v8a`、`armeabi-v7a` 的两个已签名
+  runtime AAR，并发布同时包含两种 ABI 的 Demo release APK；配置长期密钥时使用
+  长期签名，否则使用一次性的 Demo keystore。CI 会检查两个 AAR 的 ELF 架构和
+  内容隔离；
 - 产物：`ant-runtime.aar`、APK、各 ABI 的 `libant_android.so` 和
   `SHA256SUMS`，保留 30 天。
 

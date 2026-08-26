@@ -193,24 +193,55 @@ jobs:
               *,armeabi-v7a,*) ;;
               *) echo "Release ABI set must include armeabi-v7a: $REQUESTED_ABIS" >&2; exit 1 ;;
             esac
+            case ",$REQUESTED_ABIS," in
+              *,arm64-v8a,*) ;;
+              *) echo "Release ABI set must include arm64-v8a: $REQUESTED_ABIS" >&2; exit 1 ;;
+            esac
             ARMV7_SO="android/build/armeabi-v7a/jniLibs/armeabi-v7a/libant_android.so"
             test -f "$ARMV7_SO"
             ARMV7_HEADER="$("$ANDROID_SDK_ROOT/ndk/$ANDROID_NDK_VERSION/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-readelf" -h "$ARMV7_SO")"
             grep -Eq 'Class:[[:space:]]+ELF32' <<<"$ARMV7_HEADER"
             grep -Eq 'Machine:[[:space:]]+ARM' <<<"$ARMV7_HEADER"
+            ARM64_SO="android/build/arm64-v8a/jniLibs/arm64-v8a/libant_android.so"
+            test -f "$ARM64_SO"
+            ARM64_HEADER="$("$ANDROID_SDK_ROOT/ndk/$ANDROID_NDK_VERSION/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-readelf" -h "$ARM64_SO")"
+            grep -Eq 'Class:[[:space:]]+ELF64' <<<"$ARM64_HEADER"
+            grep -Eq 'Machine:[[:space:]]+AArch64' <<<"$ARM64_HEADER"
             AAR_CONTENTS="$(unzip -Z1 android/build/ant-runtime.aar)"
             grep -Fx 'jni/armeabi-v7a/libant_android.so' <<<"$AAR_CONTENTS"
+            grep -Fx 'jni/arm64-v8a/libant_android.so' <<<"$AAR_CONTENTS"
           fi
 
           rm -rf dist
           mkdir -p dist/native
-          cp android/build/ant-runtime.aar dist/
           cp "$APK" "dist/$(basename "$APK")"
           IFS=',' read -r -a ABI_LIST <<< "$REQUESTED_ABIS"
           for abi in "${ABI_LIST[@]}"; do
             mkdir -p "dist/native/$abi"
             cp "android/build/$abi/jniLibs/$abi/libant_android.so" "dist/native/$abi/"
+
+            # The build produces one multi-ABI AAR for Gradle consumption.
+            # Publish a separate AAR per ABI so hosts can depend on exactly
+            # one native runtime and avoid shipping an unwanted architecture.
+            AAR_STAGE="$(mktemp -d)"
+            unzip -q android/build/ant-runtime.aar -d "$AAR_STAGE"
+            test -f "$AAR_STAGE/jni/$abi/libant_android.so"
+            for other_dir in "$AAR_STAGE"/jni/*; do
+              [[ -d "$other_dir" ]] || continue
+              [[ "$(basename "$other_dir")" == "$abi" ]] || rm -rf "$other_dir"
+            done
+            jar --create --file "dist/ant-runtime-$abi.aar" -C "$AAR_STAGE" .
+            rm -rf "$AAR_STAGE"
+            native_entries="$(unzip -Z1 "dist/ant-runtime-$abi.aar" | grep -E '^jni/[^/]+/libant_android\.so$' | wc -l | tr -d ' ')"
+            [[ "$native_entries" == 1 ]]
+            unzip -Z1 "dist/ant-runtime-$abi.aar" | grep -Fx "jni/$abi/libant_android.so" >/dev/null
           done
+          if [[ "$REQUESTED_VARIANT" != release ]]; then
+            # Keep the historical universal AAR available in debug workflow
+            # artifacts; tag releases intentionally expose only ABI-specific
+            # AAR files.
+            cp android/build/ant-runtime.aar dist/
+          fi
           find dist -type f ! -name SHA256SUMS -print0 | sort -z | xargs -0 sha256sum > dist/SHA256SUMS
 
           {
@@ -239,7 +270,7 @@ jobs:
         uses: softprops/action-gh-release@6da8fa9354ddfdc4aeace5fc48d7f679b5214090 # v2.4.1
         with:
           files: |
-            dist/ant-runtime.aar
+            dist/ant-runtime-*.aar
             dist/app-release.apk
             dist/SHA256SUMS
           generate_release_notes: true

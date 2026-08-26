@@ -16,12 +16,18 @@ Android 运行时支持 `FILE_PATH` 和 `SAF_TREE` 两种存储位置。项目�
 
 ## 当前产物
 
-下面是本仓库在 2026-08-25 的一次 Android `arm64-v8a` release 构建结果。不同编译器、ABI 和构建变体的大小会变化，构建脚本会输出你本次构建的精确字节数。
+当前 Android 发布版本是 [FAnt v0.2.1](https://github.com/fish2018/fant/releases/tag/v0.2.1)。
+发布 AAR 按 ABI 分成两个文件，APK 则同时包含 64 位 ARM 与 32 位 ARM runtime：
 
-| 产物 | ABI/变体 | 大小 |
-| --- | --- | ---: |
-| `ant-runtime.aar` | `arm64-v8a` | 3.52 MiB |
-| [app-release.apk](android/demo/app/build/outputs/apk/release/app-release.apk) | `arm64-v8a`，minSdk 24 | 9.06 MiB |
+| 产物 | ABI/内容 | 下载 |
+| --- | --- | --- |
+| `ant-runtime-arm64-v8a.aar` | 64 位 ARM，minSdk 24 | [下载 arm64 AAR](https://github.com/fish2018/fant/releases/download/v0.2.1/ant-runtime-arm64-v8a.aar) |
+| `ant-runtime-armeabi-v7a.aar` | 32 位 ARM，minSdk 24，解释器模式 | [下载 armeabi-v7a AAR](https://github.com/fish2018/fant/releases/download/v0.2.1/ant-runtime-armeabi-v7a.aar) |
+| `app-release.apk` | `arm64-v8a` + `armeabi-v7a` 通用 APK | [下载 APK](https://github.com/fish2018/fant/releases/download/v0.2.1/app-release.apk) |
+| `SHA256SUMS` | 两个 AAR、APK 和 native 产物校验值 | [下载校验文件](https://github.com/fish2018/fant/releases/download/v0.2.1/SHA256SUMS) |
+
+不同编译器、ABI 和构建变体的大小会变化；构建脚本和 Release 页面会显示本次
+构建的实际文件大小。
 
 ## 构建
 
@@ -57,7 +63,7 @@ export ANDROID_NDK_ROOT="/path/to/android-sdk/ndk/29.0.14206865"
 ```bash
 ./scripts/build-all.sh --android-only --release \
   --sdk "$ANDROID_SDK_ROOT" --ndk "$ANDROID_NDK_ROOT" \
-  --abis arm64-v8a
+  --abis arm64-v8a,armeabi-v7a
 ```
 
 输出为 `android/demo/app/build/outputs/apk/release/app-release.apk`。Gradle 会直接
@@ -70,7 +76,7 @@ unsigned release APK。未提供生产 keystore 时，
 
 仓库提供 [Android AAR and Demo](.github/workflows/android-build.yml) workflow：PR 和
 主分支推送默认构建 arm64 debug；手动运行可选择 ABI、minSdk 和 release；`v*` tag
-会构建已签名 release。没有配置正式 keystore 时，workflow 使用一次性的 Demo keystore
+会构建并分别发布 `arm64-v8a`、`armeabi-v7a` 两个 AAR，同时生成包含两种 ABI 的已签名 release APK。没有配置正式 keystore 时，workflow 使用一次性的 Demo keystore
 保证产物仍可安装；配置 `FANT_RELEASE_*` secrets 后才使用可升级发布的长期签名。
 Action 上传 AAR、APK、各 ABI `.so` 和 `SHA256SUMS`，详细步骤见
 [BUILDING.md](BUILDING.md#10-github-actions)。
